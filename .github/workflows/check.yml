@@ -1,0 +1,18 @@
+# Runs the redstone checks every time something changes on GitHub.
+# A green tick next to a commit means the rules and every concept still load; a red X shows what broke.
+name: Check the simulator
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the redstone rules and every concept
+        run: node tests/engine.test.js
+      - name: Check the launcher scripts for typos
+        run: for f in install.sh uninstall.sh linux/start.sh linux/sync.sh; do bash -n "$f"; done
