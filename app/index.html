@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Redstone Lab</title>
+<link rel="icon" href="icon.png">
+<style>
+@font-face{font-family:'Atkinson Hyperlegible';font-style:normal;font-weight:400;font-display:swap;src:url(fonts/atkinson-hyperlegible-latin-400-normal.woff2) format('woff2')}
+@font-face{font-family:'Atkinson Hyperlegible';font-style:normal;font-weight:700;font-display:swap;src:url(fonts/atkinson-hyperlegible-latin-700-normal.woff2) format('woff2')}
+@font-face{font-family:'Pixelify Sans';font-style:normal;font-weight:500;font-display:swap;src:url(fonts/pixelify-sans-latin-500-normal.woff2) format('woff2')}
+@font-face{font-family:'Pixelify Sans';font-style:normal;font-weight:700;font-display:swap;src:url(fonts/pixelify-sans-latin-700-normal.woff2) format('woff2')}
+html{background:#121418;color-scheme:dark;scrollbar-color:#3a404c #121418}
+body{margin:0;background:#121418}
+a{color:#7fd3ff}a:hover{color:#b5e6ff}
+button{font-family:inherit}
+button:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #5cc8ff;outline-offset:2px}
+/* Hover colours. :where() keeps these weaker than the "selected" styles below, so a selected button stays highlighted. */
+:where(.hv:hover){background:#262b34 !important}
+:where(.hv-play:hover){background:#1d4060 !important}
+:where(.hv-pal:hover){background:#20252d !important;border-color:#444b57 !important}
+:where(.hv-reset:hover){background:#4a3616 !important}
+:where(.hv-lib:hover){background:#222731 !important}
+:where(.hv-step:hover){background:#20313f !important}
+.pal-on{border-color:#5cc8ff !important;background:#16293a !important;box-shadow:inset 0 0 0 1px #5cc8ff}
+.face-on{background:#5cc8ff !important;color:#0b1820 !important;border-color:#5cc8ff !important}
+.seg-on{background:#5cc8ff !important;color:#0b1820 !important}
+.tog-on{background:#16293a !important;border-color:#5cc8ff !important;color:#dff4ff !important}
+.step-on{border-color:#5cc8ff !important;background:#5cc8ff !important;color:#0b1820 !important}
+.lib-on{border-color:#5cc8ff !important}
+.walk-on{background:#ffd08a !important;color:#2a1d08 !important;border-color:#ffd08a !important}
+.is-off{opacity:.45;cursor:default !important}
+.kbd{display:inline-block;padding:0 6px;border-radius:5px;border:1px solid #3d4450;border-bottom-width:2px;background:#20242c;color:#e9e6e1;font-size:12px;line-height:1.6}
+.chip{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;font-size:12.5px;line-height:1.5;border:1px solid #39404b;background:#20242c;color:#d9dce2}
+.chip-on{background:#3d1410;border-color:#a8382c;color:#ffc2b8}
+.chip-warm{background:#3a2a12;border-color:#9a6a24;color:#ffd99a}
+.chip-off{background:#1c1f25;border-color:#353b46;color:#a9aeb8}
+.act{height:32px;padding:0 11px;border-radius:7px;border:1px solid #343a45;background:#1d2128;color:#ece9e4;font-size:13.5px;cursor:pointer}
+.act:hover{background:#262b34}
+.act-on{background:#16293a;border-color:#5cc8ff}
+.spd-on{border-color:#5cc8ff !important;background:#16293a !important;color:#dff4ff !important}
+.tl-on{color:#ff8a78}
+.tl-off{color:#8d939d}
+@media (max-width: 760px){.rl-col{flex-basis:100% !important;max-width:none !important}}
+/* Shown only if something in the code is broken (for example a typo in concepts.js). */
+#boot-error{display:none;margin:24px;padding:16px 18px;border-radius:12px;background:#3d1410;border:1px solid #a8382c;color:#ffd9d2;font:15px/1.5 system-ui,sans-serif;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div id="boot-error" role="alert"></div>
+<div id="app"></div>
+<script>
+/* If something in the code is broken, say so on screen instead of showing a blank window.
+   Each app/js file adds its name to __rlLoaded when it finishes, so main.js can tell which file has the mistake.
+   (The desktop app shows the exact line too; plain browsers hide those details for files opened from disk.) */
+(function () {
+  var VAGUE = 'Something in the code went wrong.';
+  var msgs = [];
+  function report(msg) {
+    msg = String(msg || '');
+    if (!msg || msg === 'Script error.') msg = VAGUE;
+    if (msgs.indexOf(msg) < 0 && msgs.length < 5) msgs.push(msg);
+    var shown = msgs.length > 1 ? msgs.filter(function (m) { return m !== VAGUE; }) : msgs;
+    var box = document.getElementById('boot-error');
+    if (!box) return;
+    box.textContent = 'Redstone Lab hit a problem.\n\n' + shown.join('\n') +
+      '\n\nIf you just changed something on GitHub, look for a typo in that file. A missing comma or quote is the usual cause, often on the line just above the one shown. Fix it there, then reopen the app.';
+    box.style.display = 'block';
+  }
+  window.addEventListener('error', function (e) {
+    var f = String(e.filename || '').split('?')[0], k = f.lastIndexOf('/app/');
+    var where = f && e.lineno ? ' (' + (k >= 0 ? f.slice(k + 1) : f.split('/').pop()) + ', line ' + e.lineno + ')' : '';
+    report(String(e.message || '').replace(/^Uncaught\s*/, '') + where);
+  });
+  window.__rlLoaded = [];
+  window.__rlReport = report;
+})();
+</script>
+<script src="vendor/preact.umd.js"></script>
+<script src="vendor/htm.umd.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/drawing.js"></script>
+<script src="js/concepts.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

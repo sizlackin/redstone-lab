@@ -1,0 +1,7 @@
+# Keep Linux line endings on scripts, even if someone edits them on Windows.
+*.sh text eol=lf
+*.js text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.woff2 binary
+*.png binary

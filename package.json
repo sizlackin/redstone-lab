@@ -1,0 +1,14 @@
+{
+  "name": "redstone-lab",
+  "productName": "Redstone Lab",
+  "version": "1.0.0",
+  "description": "A drag-and-drop Minecraft redstone simulator (Java Edition rules) that teaches how circuits work.",
+  "homepage": "https://github.com/sizlackin/redstone-lab",
+  "main": "main.js",
+  "desktopName": "redstone-lab.desktop",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node tests/engine.test.js"
+  }
+}
