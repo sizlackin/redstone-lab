@@ -15,7 +15,7 @@ curl -fsSL https://raw.githubusercontent.com/sizlackin/redstone-lab/main/install
 The installer does three things:
 
 1. Downloads the app into `~/.local/share/redstone-lab`.
-2. Offers to install Electron, the program that gives the app its own window. On CachyOS or Arch it runs `sudo pacman -S --needed electron`, so it asks for your password.
+2. Offers to install Electron, the program that gives the app its own window. On CachyOS or Arch it runs `sudo pacman -Syu --needed electron`, which also installs any system updates you haven't done yet, and asks for your password.
 3. Adds **Redstone Lab** to your app menu. You can also start it from a terminal by typing `redstone-lab`.
 
 No Electron? The app still opens, in app mode of Chromium, Chrome, Brave, Vivaldi or Edge, or in your normal browser.

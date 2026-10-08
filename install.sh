@@ -50,12 +50,16 @@ main() {
   if [ -n "$electron" ]; then
     say "Found Electron ($electron)"
   elif command -v pacman >/dev/null 2>&1; then
-    say "Redstone Lab runs in Electron, which isn't installed yet."
+    # -Syu refreshes pacman's list of packages first. With an old list, pacman asks the download
+    # servers for an Electron version they've already deleted, and the install fails.
+    say "Redstone Lab runs in Electron, which isn't installed yet. Installing it runs:"
+    say "  sudo pacman -Syu --needed electron"
+    say "That also installs any system updates you haven't done yet, and asks for your password."
     answer="n"
     if [ "${REDSTONE_LAB_YES:-0}" = 1 ]; then
       answer="y"
     elif has_tty; then
-      printf '  Install it now with pacman? It will ask for your password. [Y/n] '
+      printf '  Install Electron now? [Y/n] '
       read -r answer </dev/tty || answer="n"
       answer="${answer:-y}"
     fi
@@ -64,12 +68,12 @@ main() {
         # pacman reads its own "Proceed?" question from the keyboard, not from this script's input.
         # shellcheck disable=SC2024 # (the keyboard is yours; sudo doesn't need to open it)
         if has_tty; then
-          sudo pacman -S --needed electron </dev/tty || say "Electron didn't install. You can try later with:  sudo pacman -S electron"
+          sudo pacman -Syu --needed electron </dev/tty || say "Electron didn't install. You can try again later with:  sudo pacman -Syu electron"
         else
-          sudo pacman -S --needed --noconfirm electron </dev/null || say "Electron didn't install. You can try later with:  sudo pacman -S electron"
+          sudo pacman -Syu --needed --noconfirm electron </dev/null || say "Electron didn't install. You can try again later with:  sudo pacman -Syu electron"
         fi
         ;;
-      *) say "Skipped. Without Electron the app opens in Chromium, Chrome or Brave (app mode) instead." ;;
+      *) say "Skipped. You can install it later with:  sudo pacman -Syu electron   (until then the app opens in a browser)." ;;
     esac
   else
     say "Electron isn't installed. Install it with your package manager for the best experience."
