@@ -413,6 +413,17 @@ const HL_UNDER = [prim(R(0, 0, 40, 40), '#5cc8ff', { op: 0.17 })];
 const HL_OVER = [prim(R(2, 2, 36, 36), 'none', { stroke: '#5cc8ff', sw: 2.6, da: '5 3' })];
 const ERASE_MARK = [prim('M9 9L31 31M31 9L9 31', 'none', { stroke: '#ff6b6b', sw: 3.5 })];
 const BLOCKED_MARK = [prim(CIRC(20, 20, 11), 'none', { stroke: '#ffb84d', sw: 3 }), prim('M12.5 27.5L27.5 12.5', 'none', { stroke: '#ffb84d', sw: 3 })];
+/* "Hold R and point": a ring on the part being turned, plus an arrow on each side it could face.
+   The way it faces now is bright blue; sides it can't face (no block to hang on) get no arrow. */
+const AIM_ARROWS = ['M20 -14L29 -3H11Z', 'M54 20L43 29V11Z', 'M20 54L29 43H11Z', 'M-14 20L-3 29V11Z'];
+function aimMark(dirs, cur) {
+  const out = [prim(R(1.2, 1.2, 37.6, 37.6), 'none', { stroke: '#5cc8ff', sw: 2.4 })];
+  for (let d = 0; d < 4; d++) {
+    if (dirs.indexOf(d) < 0) continue;
+    out.push(prim(AIM_ARROWS[d], d === cur ? '#5cc8ff' : '#ffffff', { op: d === cur ? 1 : 0.4, stroke: '#0b1820', sw: 1.2 }));
+  }
+  return out;
+}
 function stepBadge(n) {
   const s = String(n), px = 2, w = s.length * 4 * px - px, cx = 31.5, cy = 8.5;
   return [prim(CIRC(cx, cy, 8.2), '#5cc8ff', { stroke: '#0b1820', sw: 1.4 }), prim(pxText(s, cx - w / 2, cy - 2.5 * px, px), '#0b1820', { sr: 'crispEdges' })];

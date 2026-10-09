@@ -58,6 +58,28 @@ function facingHint(b, f) {
   }
 }
 const SPEEDS = [[0.25, '¼×'], [0.5, '½×'], [1, '1×'], [2, '2×'], [4, '4×']];
+const ARROW_DIRS = { ArrowUp: 0, ArrowRight: 1, ArrowDown: 2, ArrowLeft: 3 };
+/* Which way (0-3 = up/right/down/left) a point dx, dy away from a square's centre is, snapped to the
+   nearest side. -1 while it's still within `dead` of the centre. */
+function dirToward(dx, dy, dead) {
+  if (Math.hypot(dx, dy) < dead) return -1;
+  return Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 1 : 3) : (dy > 0 ? 2 : 0);
+}
+/* "The repeater now points east →." and so on, after a part was turned. */
+function facingWords(what, f, t) {
+  if (f < 0) return 'The ' + what + ' is now standing on the floor.';
+  const w = DWORD[f] + ' ' + DARROW[f];
+  switch (t) {
+    case 'observer': return 'The observer now watches ' + w + '. Its pulse comes out the ' + DWORD[opp(f)] + ' side.';
+    case 'piston': return 'The ' + what + ' now pushes ' + w + '.';
+    case 'dispenser': return 'The dispenser now shoots ' + w + '.';
+    default: return 'The ' + what + ' now points ' + w + '.';
+  }
+}
+/* True while you're typing in a text box, so letters like R keep working there. */
+function typingIn(el) {
+  return !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.isContentEditable);
+}
 
 class RedstoneLab extends PreactComponent {
   constructor(props) {
@@ -68,6 +90,8 @@ class RedstoneLab extends PreactComponent {
     this.undoStack = [];
     this.probes = [];
     this.stroke = null;
+    this.aim = null;      // set while R is held: which part (or the piece in your hand) is being pointed
+    this.pointer = null;  // last mouse position, for pointing with R
     this.mounted = false;
     this.noticeTimer = null;
     this.raf = 0;
@@ -83,7 +107,7 @@ class RedstoneLab extends PreactComponent {
     };
     const bind = ['gDown', 'gMove', 'gUp', 'gLeave', 'gCtx', 'gKey', 'gDragOver', 'gDrop', 'togglePlay', 'stepBtn',
       'undo', 'restart', 'resetBuild', 'hideQuick', 'hideToast', 'toggleNums', 'toggleWalk', 'onCode', 'copyCode', 'loadCode',
-      'clearGrid', 'stepPrev', 'stepNext'];
+      'clearGrid', 'stepPrev', 'stepNext', 'onWinKeyDown', 'onWinKeyUp', 'onWinPointerMove', 'onWinBlur'];
     for (const k of bind) this[k] = this[k].bind(this);
     this.speedFns = SPEEDS.map((s) => () => this.setState({ speed: s[0] }));
     this.faceFns = [0, 1, 2, 3].map((d) => () => this.setState({ facing: d }));
@@ -127,11 +151,19 @@ class RedstoneLab extends PreactComponent {
       if (n) this.refresh();
     };
     this.raf = requestAnimationFrame(loop);
+    window.addEventListener('keydown', this.onWinKeyDown);
+    window.addEventListener('keyup', this.onWinKeyUp);
+    window.addEventListener('pointermove', this.onWinPointerMove);
+    window.addEventListener('blur', this.onWinBlur);
   }
   componentWillUnmount() {
     this.mounted = false;
     cancelAnimationFrame(this.raf);
     clearTimeout(this.noticeTimer);
+    window.removeEventListener('keydown', this.onWinKeyDown);
+    window.removeEventListener('keyup', this.onWinKeyUp);
+    window.removeEventListener('pointermove', this.onWinPointerMove);
+    window.removeEventListener('blur', this.onWinBlur);
   }
 
   put(patch) { if (this.mounted) this.setState(patch); else Object.assign(this.state, patch); }
@@ -253,6 +285,7 @@ class RedstoneLab extends PreactComponent {
     this.refresh();
   }
   gDown(e) {
+    if (this.aim) { e.preventDefault(); return; }
     if (e.button === 1) return;
     const i = this.cellAt(e);
     if (i < 0) return;
@@ -285,6 +318,7 @@ class RedstoneLab extends PreactComponent {
   gLeave() { if (!this.stroke && this.state.hover !== -1) this.setState({ hover: -1 }); }
   gCtx(e) { e.preventDefault(); }
   gKey(e) {
+    if (this.aim) return; // R is held: the arrow keys point the part instead (see onWinKeyDown)
     const k = e.key, st = this.state;
     let cur = st.kb >= 0 ? st.kb : st.sel >= 0 ? st.sel : (GH >> 1) * GW + (GW >> 1);
     const mv = { ArrowUp: 0, ArrowRight: 1, ArrowDown: 2, ArrowLeft: 3 }[k];
@@ -295,8 +329,7 @@ class RedstoneLab extends PreactComponent {
       return;
     }
     if (k === 'Enter' || k === ' ') { e.preventDefault(); this.act(cur, false, e.shiftKey, false); this.setState({ kb: cur, sel: cur, kbMode: true }); return; }
-    if (k === 'Delete' || k === 'Backspace') { e.preventDefault(); this.act(cur, true, false, false); this.setState({ kb: cur, sel: cur, kbMode: true }); return; }
-    if (k === 'r' || k === 'R') { e.preventDefault(); this.setState({ facing: e.shiftKey ? ccw(st.facing) : cw(st.facing) }); }
+    if (k === 'Delete' || k === 'Backspace') { e.preventDefault(); this.act(cur, true, false, false); this.setState({ kb: cur, sel: cur, kbMode: true }); }
   }
   gDragOver(e) {
     e.preventDefault();
@@ -343,8 +376,125 @@ class RedstoneLab extends PreactComponent {
   }
 
   useCell(i) { this.sim.use(i); this.refresh(); }
-  turnCell(i) { this.snapshot(); if (!this.sim.rotate(i)) this.undoStack.pop(); this.refresh(); }
+  turnCell(i, back) { this.snapshot(); if (!this.sim.rotate(i, back)) this.undoStack.pop(); this.refresh(); }
   deleteCell(i) { this.snapshot(); this.sim.erase(i); this.refresh(); }
+
+  /* ================= Turning parts with R =================
+     Tap R: the part under the mouse (or the selected part) turns to its next direction. Shift+R turns it back.
+     Hold R and move the mouse: the part turns to face the mouse, snapping to up, right, down or left.
+     Let go of R to keep it, or press Esc to put it back. The arrow keys work too while R is held.
+     With no part to turn, R does the same to the piece in your hand. */
+  redraw() { if (this.mounted) this.forceUpdate(); }
+  aimTarget() {
+    const st = this.state, b = this.brush();
+    const turnable = (i) => { const c = i >= 0 ? this.sim.at(i) : null; return !!c && !!TURNABLE[c.t]; };
+    const under = st.kbMode ? st.kb : st.hover;
+    const aimsBrush = !!(b.dir || b.att);
+    // 1. a part you're pointing at  2. the piece in your hand, over the empty square you're pointing at
+    // 3. the selected part  4. the piece in your hand (tapping R turns it)
+    if (turnable(under)) return { kind: 'part', i: under };
+    if (aimsBrush && under >= 0 && !this.sim.at(under)) return { kind: 'brush', i: under };
+    if (turnable(st.sel)) return { kind: 'part', i: st.sel };
+    if (aimsBrush) return { kind: 'brush', i: -1 };
+    return null;
+  }
+  aimStart(back) {
+    const t = this.aimTarget();
+    if (!t) {
+      this.flash('Point at a part that can turn (a repeater, observer, piston and so on), then press R.');
+      return false;
+    }
+    const f = t.kind === 'part' ? this.sim.at(t.i).f : this.state.facing;
+    // It only follows the mouse once the mouse moves, so a quick tap of R always turns one step.
+    this.aim = { kind: t.kind, i: t.i, back: !!back, orig: f, cur: f, aimed: false, saved: false };
+    this.stroke = null;
+    if (t.kind === 'part') this.put({ sel: t.i });
+    this.redraw();
+    return true;
+  }
+  /* The way from the aimed square to the mouse, or -1 while the mouse is still on that square. */
+  aimDirAtPointer() {
+    const a = this.aim, el = this.svgRef.current, p = this.pointer;
+    if (!a || a.i < 0 || !el || !p) return -1;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) return -1;
+    const w = r.width / GW, h = r.height / GH;
+    const cx = r.left + ((a.i % GW) + 0.5) * w, cy = r.top + (((a.i / GW) | 0) + 0.5) * h;
+    return dirToward(p.x - cx, p.y - cy, 0.45 * w);
+  }
+  aimFollowPointer() {
+    const d = this.aimDirAtPointer();
+    if (d >= 0) this.aimToward(d);
+  }
+  /* Point the aimed part (or the piece in your hand) toward d. */
+  aimToward(d) {
+    const a = this.aim;
+    if (!a) return;
+    a.aimed = true;
+    if (a.kind === 'brush') {
+      if (a.cur !== d) { a.cur = d; this.put({ facing: d }); }
+      return;
+    }
+    const c = this.sim.at(a.i);
+    if (!c || !TURNABLE[c.t]) { this.aim = null; this.redraw(); return; }
+    if (c.f === d || this.sim.facingOptions(a.i).indexOf(d) < 0) return;
+    if (!a.saved) { this.snapshot(); a.saved = true; }
+    if (this.sim.setFacing(a.i, d)) a.cur = d;
+    this.refresh();
+  }
+  aimEnd(keep) {
+    const a = this.aim;
+    if (!a) return;
+    this.aim = null;
+    const pc = a.kind === 'part' ? this.sim.at(a.i) : null;
+    const what = pc ? shortName(pc).toLowerCase() : this.brush().name.toLowerCase();
+    const type = pc ? pc.t : this.brush().t;
+    if (!keep) {
+      if (a.kind === 'part' && a.saved) {
+        this.sim.setFacing(a.i, a.orig);
+        this.undoStack.pop();
+      } else if (a.kind === 'brush') this.put({ facing: a.orig });
+      this.flash('Put back the way it was.');
+    } else if (!a.aimed) {
+      // A quick tap: turn one step.
+      if (a.kind === 'part') {
+        this.turnCell(a.i, a.back);
+        const c = this.sim.at(a.i);
+        if (c && c.f !== a.orig) this.flash(facingWords(what, c.f, c.t));
+      } else {
+        const f = a.back ? ccw(this.state.facing) : cw(this.state.facing);
+        this.put({ facing: f });
+      }
+    } else if (a.kind === 'part' && a.saved && a.cur !== a.orig) {
+      this.flash(facingWords(what, a.cur, type) + ' Undo puts it back.');
+    } else if (a.kind === 'brush' && a.cur !== a.orig) {
+      this.flash('The ' + what + ' in your hand now faces ' + DWORD[a.cur] + ' ' + DARROW[a.cur] + '.');
+    }
+    this.refresh();
+  }
+  onWinKeyDown(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey || typingIn(e.target)) return;
+    const k = e.key;
+    if (this.aim) {
+      const d = ARROW_DIRS[k];
+      if (d != null) { e.preventDefault(); this.aimToward(d); this.redraw(); return; }
+      if (k === 'Escape') { e.preventDefault(); this.aimEnd(false); return; }
+    }
+    if (k !== 'r' && k !== 'R') return;
+    e.preventDefault();
+    if (e.repeat || this.aim) return;
+    this.aimStart(e.shiftKey);
+  }
+  onWinKeyUp(e) {
+    if (this.aim && (e.key === 'r' || e.key === 'R')) this.aimEnd(true);
+  }
+  onWinPointerMove(e) {
+    this.pointer = { x: e.clientX, y: e.clientY };
+    if (!this.aim || this.aim.i < 0) return;
+    this.aimFollowPointer();
+    this.redraw();
+  }
+  onWinBlur() { if (this.aim) this.aimEnd(true); }
   setDelay(i, d) { if (this.sim.setDelay(i, d)) this.refresh(); }
   isProbed(i) { return this.probes.some((p) => p.i === i); }
   toggleProbe(i) {
@@ -638,7 +788,10 @@ class RedstoneLab extends PreactComponent {
         break;
       default: break;
     }
-    if (turn) act('Turn', () => this.turnCell(i));
+    if (turn) {
+      line('To turn it, hold R and move your mouse where it should face. Tapping R or Shift+click turns it one step.');
+      act('Turn', () => this.turnCell(i));
+    }
     if (c.t !== 'head' && c.t !== 'moving') act(this.isProbed(i) ? 'Stop tracking' : 'Track on timeline', () => this.toggleProbe(i), this.isProbed(i));
     act('Delete', () => this.deleteCell(i));
     return out;
@@ -664,7 +817,17 @@ class RedstoneLab extends PreactComponent {
     this.probes.forEach((p, k) => over.push({ tr: cellTr(p.i), p: probeBadge(k + 1) }));
     if (st.sel >= 0 && !st.kbMode) over.push({ tr: cellTr(st.sel), p: SEL_MARK });
     const hv = st.kbMode ? st.kb : st.hover;
-    if (hv >= 0) {
+    const aim = this.aim;
+    if (aim && aim.i >= 0) {
+      if (aim.kind === 'brush') {
+        const g = this.ghost(aim.i, b);
+        if (g) over.push({ tr: cellTr(aim.i), p: g });
+        over.push({ tr: cellTr(aim.i), p: aimMark([0, 1, 2, 3], st.facing) });
+      } else {
+        const ac = sim.at(aim.i);
+        if (ac) over.push({ tr: cellTr(aim.i), p: aimMark(sim.facingOptions(aim.i), ac.f) });
+      }
+    } else if (hv >= 0) {
       const hc = sim.at(hv);
       if (!hc && b.t !== 'eraser') { const g = this.ghost(hv, b); if (g) over.push({ tr: cellTr(hv), p: g }); }
       else if (hc && b.t === 'eraser') over.push({ tr: cellTr(hv), p: ERASE_MARK });
@@ -678,7 +841,7 @@ class RedstoneLab extends PreactComponent {
     const dirBrush = !!(b.dir || b.att);
     const face = (d) => ({ fn: this.faceFns[d], on: dirBrush && st.facing === d, cls: dirBrush && st.facing === d ? 'face-on' : (dirBrush ? '' : 'is-off') });
 
-    const target = st.kbMode ? st.kb : st.hover >= 0 ? st.hover : st.sel;
+    const target = aim && aim.kind === 'part' ? aim.i : st.kbMode ? st.kb : st.hover >= 0 ? st.hover : st.sel;
     const insp = target >= 0 ? this.describe(target) : {
       name: 'Nothing selected', where: 'Point at a square on the grid', chips: [], icon: [], actions: [],
       lines: ['Everything you point at is explained here: what it is, how much power it has, and why.'],
@@ -742,7 +905,9 @@ class RedstoneLab extends PreactComponent {
       under, cells, over,
 
       toggleNums: this.toggleNums, nums: st.nums, numsCls: st.nums ? 'tog-on' : '',
-      notice: st.notice,
+      notice: aim && aim.i >= 0
+        ? 'Point your mouse where the ' + (aim.kind === 'part' && sim.at(aim.i) ? shortName(sim.at(aim.i)).toLowerCase() : b.name.toLowerCase()) + ' should face, then let go of R. Esc puts it back.'
+        : st.notice,
       toast: st.toast, hideToast: this.hideToast,
 
       noProbes: this.probes.length === 0,
@@ -905,7 +1070,7 @@ function viewToolbar(v) {
 function viewGrid(v) {
   return html`
   <div style="border: 1px solid #2a2f38; border-radius: 12px; background: #0d0f12; padding: 8px; overflow-x: auto">
-    <button onPointerDown=${v.gDown} onPointerMove=${v.gMove} onPointerUp=${v.gUp} onPointerCancel=${v.gUp} onPointerLeave=${v.gLeave} onContextMenu=${v.gCtx} onKeyDown=${v.gKey} onDragOver=${v.gDragOver} onDrop=${v.gDrop} onDragLeave=${v.gLeave} aria-label="Redstone grid, 24 by 16 squares. Arrow keys move the cursor, Enter places or uses, Shift+Enter turns a part, Delete removes, R turns the piece in your hand." style="display: block; width: 100%; min-width: 620px; padding: 0; margin: 0; border: 0; border-radius: 6px; background: transparent; cursor: crosshair; touch-action: none; user-select: none">
+    <button onPointerDown=${v.gDown} onPointerMove=${v.gMove} onPointerUp=${v.gUp} onPointerCancel=${v.gUp} onPointerLeave=${v.gLeave} onContextMenu=${v.gCtx} onKeyDown=${v.gKey} onDragOver=${v.gDragOver} onDrop=${v.gDrop} onDragLeave=${v.gLeave} aria-label="Redstone grid, 24 by 16 squares. Arrow keys move the cursor, Enter places or uses, Shift+Enter turns a part, Delete removes. R turns the part under the cursor, or the piece in your hand; hold R and press an arrow key to point it that way." style="display: block; width: 100%; min-width: 620px; padding: 0; margin: 0; border: 0; border-radius: 6px; background: transparent; cursor: crosshair; touch-action: none; user-select: none">
       <svg ref=${v.svgRef} viewBox="0 0 960 640" aria-hidden="true" style="display: block; width: 100%; height: auto">
         <path d=${v.bgD} fill="#1f232b"></path>
         <path d=${v.minorD} fill="none" stroke="#3a404c" stroke-width="1.4"></path>
@@ -927,11 +1092,11 @@ function viewGridHelp(v) {
     <div aria-label="How to use the grid" style="flex: 1 1 420px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 13px; color: #a8adb7">
       <span>${key('Click')} empty square = place</span>
       <span>${key('Click')} a part = use it</span>
-      <span>${key('Shift')} + ${key('Click')} = turn it</span>
       <span>${key('Right-click')} = remove</span>
       <span>${key('Drag')} = draw a line</span>
-      <span>${key('R')} = turn what’s in your hand</span>
-      <span>Arrows on parts show which way the signal goes</span>
+      <span>${key('R')} or ${key('Shift')} + ${key('Click')} = turn a part</span>
+      <span>Hold ${key('R')} + move mouse = point it</span>
+      <span>Arrows show where the signal goes</span>
     </div>
     <div style="display: flex; gap: 6px">
       <button onClick=${v.toggleNums} class=${v.numsCls} aria-pressed=${v.nums} title="Show or hide the power level printed on each piece of dust" style="height: 32px; padding: 0 11px; border-radius: 7px; border: 1px solid #343a45; background: #1d2128; color: #c9cdd4; font-size: 13px; cursor: pointer">Power numbers</button>

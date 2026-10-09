@@ -18,6 +18,8 @@ const PRI_EXTREME = -3, PRI_VHIGH = -2, PRI_HIGH = -1, PRI_NORMAL = 0;
 const EV_EXTEND = 0, EV_CONTRACT = 1, EV_DROP = 2;
 const FULL_AMMO = 576;
 const ATTACH = { torch: true, lever: true, button: true, hook: true };
+/* Parts that face a direction and can be turned (Shift+click, the Turn button, or R). */
+const TURNABLE = { repeater: true, comparator: true, observer: true, piston: true, dispenser: true, torch: true, lever: true, button: true, hook: true };
 
 const TYPES = {
   block: { name: 'Solid Block', conductive: true, push: 'normal' },
@@ -741,39 +743,50 @@ function createSim(W, H) {
     settle();
     return true;
   }
-  function rotate(i) {
+  /* ---- turning parts ----
+     Which ways a part could face right where it is: 0-3 = N/E/S/W, -1 = standing on the floor.
+     Wall parts (torches, levers, buttons, hooks) point away from the block they hang on, so they can
+     only face a way that has a solid block behind it. */
+  function facingOptions(i) {
     const c = at(i);
-    if (!c) return false;
+    if (!c || !TURNABLE[c.t]) return [];
+    if (c.t === 'piston' && c.ext) return [];
+    if (c.t === 'hook') return wallOptions(i);
+    if (ATTACH[c.t]) return [-1].concat(wallOptions(i));
+    return [0, 1, 2, 3];
+  }
+  /* Turns the part at i to face f. Returns false (and says why) when it can't face that way. */
+  function setFacing(i, f) {
+    const c = at(i);
+    if (!c || !TURNABLE[c.t]) return false;
+    if (c.t === 'piston' && c.ext) { note('Let the piston retract before turning it.'); return false; }
+    if (c.f === f || facingOptions(i).indexOf(f) < 0) return false;
     switch (c.t) {
-      case 'repeater': setCell(i, makeCell('repeater', cw(c.f), { d: c.d })); break;
-      case 'comparator': setCell(i, makeCell('comparator', cw(c.f), { sub: c.sub })); break;
-      case 'observer': setCell(i, makeCell('observer', cw(c.f))); break;
-      case 'dispenser': setCell(i, makeCell('dispenser', cw(c.f), { items: c.items })); break;
-      case 'piston':
-        if (c.ext) { note('Let the piston retract before turning it.'); return false; }
-        setCell(i, makeCell('piston', cw(c.f), { sticky: c.sticky }));
-        break;
-      case 'torch': case 'lever': case 'button': case 'hook': {
-        const opts = wallOptions(i);
-        if (c.t !== 'hook') opts.push(-1);
-        const order = [-1, 0, 1, 2, 3];
-        const k = order.indexOf(c.f);
-        let nf = c.f;
-        for (let s = 1; s <= 5; s++) {
-          const cand = order[(k + s) % 5];
-          if (opts.indexOf(cand) >= 0) { nf = cand; break; }
-        }
-        if (nf === c.f) {
-          note(c.t === 'hook' ? 'There is no other block this hook could be stuck to.' : 'There is no other way to place it here.');
-          return false;
-        }
-        setCell(i, makeCell(c.t, nf, { wood: c.wood, on: c.t === 'lever' ? c.on : false }));
-        break;
-      }
-      default: return false;
+      case 'repeater': setCell(i, makeCell('repeater', f, { d: c.d })); break;
+      case 'comparator': setCell(i, makeCell('comparator', f, { sub: c.sub })); break;
+      case 'observer': setCell(i, makeCell('observer', f)); break;
+      case 'dispenser': setCell(i, makeCell('dispenser', f, { items: c.items })); break;
+      case 'piston': setCell(i, makeCell('piston', f, { sticky: c.sticky })); break;
+      default: setCell(i, makeCell(c.t, f, { wood: c.wood, on: c.t === 'lever' ? c.on : false })); break;
     }
     settle();
     return true;
+  }
+  /* Turns a part to its next possible direction: clockwise, or counter-clockwise when back is true.
+     Wall parts also visit "on the floor" (torches, levers, buttons). */
+  function rotate(i, back) {
+    const c = at(i);
+    if (!c || !TURNABLE[c.t]) return false;
+    if (c.t === 'piston' && c.ext) { note('Let the piston retract before turning it.'); return false; }
+    const opts = facingOptions(i);
+    const order = ATTACH[c.t] ? [-1, 0, 1, 2, 3] : [0, 1, 2, 3];
+    const n = order.length, k = order.indexOf(c.f);
+    for (let s = 1; s < n; s++) {
+      const cand = order[(k + (back ? n - s : s)) % n];
+      if (opts.indexOf(cand) >= 0) return setFacing(i, cand);
+    }
+    note(c.t === 'hook' ? 'There is no other block this hook could be stuck to.' : 'There is no other way to place it here.');
+    return false;
   }
 
   /* ---- saving and loading layouts ---- */
@@ -839,7 +852,7 @@ function createSim(W, H) {
   }
 
   return {
-    S, W, H, N, nb, at, step, settle, place, erase, use, rotate, setDelay, load, serialize,
+    S, W, H, N, nb, at, step, settle, place, erase, use, rotate, setFacing, facingOptions, setDelay, load, serialize,
     blockPower, signalFrom, hasSignal, repInput, repLocked, cmpRear, cmpSide, cmpOut, pistonPowered,
     torchPowered, sturdy, supported, wallOptions, pendingAt, analog, linksOf,
   };

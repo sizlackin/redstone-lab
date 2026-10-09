@@ -19,7 +19,7 @@ const fakeWindow = {
   localStorage: { getItem: () => null, setItem: () => {} },
   location: { search: '' },
 };
-const mod = new Function('window', src + '\n;return { createSim, CONCEPTS, RedstoneLab, makeCell, cellKey, drawPart, GW, GH, PALETTE };')(fakeWindow);
+const mod = new Function('window', src + '\n;return { createSim, CONCEPTS, RedstoneLab, makeCell, cellKey, drawPart, GW, GH, PALETTE, dirToward, aimMark };')(fakeWindow);
 const { createSim, CONCEPTS, GW } = mod;
 const Component = mod.RedstoneLab;
 
@@ -299,6 +299,139 @@ function run(s, n, fn) { const out = []; for (let k = 0; k < n; k++) { s.step();
       for (const pt of (st.cells || []).concat(st.badge ? [st.badge] : [])) ok(onGrid(pt), 'concept "' + cp.id + '": step square off the grid ' + JSON.stringify(pt));
     }
   }
+}
+// 20. Turning parts: setFacing / facingOptions / rotate both ways
+{
+  // Lever west of the repeater, and a second lever feeding in from the north
+  const s = mk([['lever', 0, 2, 'floor', 'on'], ['dust', 1, 2], ['repeater', 2, 2, 'E', 3], ['dust', 3, 2],
+    ['lever', 2, 0, 'floor', 'on'], ['dust', 2, 1], ['dust', 2, 3]]);
+  run(s, 10);
+  const R2 = I(2, 2);
+  eq(s.facingOptions(R2), [0, 1, 2, 3], 'repeater can face all four ways');
+  ok(s.at(I(3, 2)).p === 15 && s.at(I(2, 3)).p === 0, 'facing east it powers the dust east of it only');
+  ok(s.setFacing(R2, 2) && s.at(R2).f === 2 && s.at(R2).d === 3, 'setFacing turns it and keeps its delay');
+  run(s, 10);
+  ok(s.at(I(3, 2)).p === 0 && s.at(I(2, 3)).p === 15, 'turned south, it takes power from the north and powers the dust below instead');
+  ok(!s.setFacing(R2, 2), 'setFacing to the way it already faces does nothing');
+  ok(s.rotate(R2, true) && s.at(R2).f === 1, 'rotate backwards goes counter-clockwise (south to east)');
+  ok(s.rotate(R2) && s.at(R2).f === 2, 'rotate forwards goes clockwise (east to south)');
+
+  const t = mk([['block', 5, 5], ['torch', 6, 5, 'E']]);
+  const T = I(6, 5);
+  eq(t.facingOptions(T), [-1, 1], 'a wall torch can face away from its block, or stand on the floor');
+  ok(!t.setFacing(T, 0) && t.at(T).f === 1, 'a torch can not point north with no block south of it');
+  ok(t.setFacing(T, -1) && t.at(T).f === -1, 'a torch can be stood on the floor');
+  ok(t.setFacing(T, 1) && t.at(T).f === 1, '...and hung back on its block');
+
+  const h = mk([['block', 5, 5], ['tripwire_hook', 6, 5, 'E']]);
+  eq(h.facingOptions(I(6, 5)), [1], 'a hook can only face away from the one block it hangs on');
+  ok(!h.rotate(I(6, 5)) && h.S.notices.length > 0, 'turning that hook explains why it can not');
+
+  const p = mk([['lever', 0, 0, 'floor', 'on'], ['piston', 1, 0, 'E']]);
+  run(p, 6);
+  ok(p.at(I(1, 0)).ext && p.facingOptions(I(1, 0)).length === 0 && !p.setFacing(I(1, 0), 2), 'an extended piston can not be turned');
+  ok(p.S.notices.some((n) => /retract/.test(n)), 'and it says to let the piston retract first');
+}
+// 21. Hold R and point: the app's aiming logic
+{
+  const { dirToward, aimMark } = mod;
+  eq([dirToward(10, 0, 5), dirToward(0, -10, 5), dirToward(-10, 3, 5), dirToward(2, 10, 5), dirToward(-3, 2, 5)], [1, 0, 3, 2, -1], 'mouse direction snaps to the nearest side, with a dead zone on the square');
+  ok(aimMark([1, 3], 1).length === 3, 'aim arrows only on the sides it can face');
+
+  const comp = new Component({});
+  comp.componentDidMount = () => {};
+  comp.mounted = true;
+  comp.state.code = JSON.stringify({ v: 1, cells: [['repeater', 5, 5, 'E', 2], ['dust', 8, 5], ['block', 10, 10], ['torch', 11, 10, 'E']] });
+  comp.loadCode();
+  const R5 = I(5, 5), D8 = I(8, 5), T11 = I(11, 10);
+  const facing = () => comp.sim.at(R5).f;
+  const undos = () => comp.undoStack.length;
+  const key = (k, extra) => Object.assign({ key: k, repeat: false, shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, target: { tagName: 'BUTTON' }, preventDefault() {} }, extra || {});
+
+  // Hold R over the repeater and point down
+  comp.state.hover = R5; comp.state.sel = -1; comp.state.kbMode = false;
+  let u0 = undos();
+  comp.onWinKeyDown(key('r'));
+  ok(comp.aim && comp.aim.kind === 'part' && comp.aim.i === R5, 'R over a repeater starts pointing it');
+  comp.aimToward(2);
+  ok(facing() === 2, 'pointing down turns it to face south straight away');
+  comp.aimToward(3);
+  ok(facing() === 3, 'then west');
+  let v = comp.renderVals();
+  ok(/let go of R/.test(v.notice) && v.insp.name === 'Redstone Repeater', 'while R is held, the status line explains it and the inspector shows the repeater');
+  comp.onWinKeyUp(key('r'));
+  ok(!comp.aim && facing() === 3 && undos() === u0 + 1, 'letting go keeps it, as one Undo step');
+  comp.undo();
+  ok(facing() === 1, 'Undo puts it back');
+
+  // A quick tap turns one step; Shift+tap turns back
+  comp.state.hover = R5;
+  comp.onWinKeyDown(key('r')); comp.onWinKeyUp(key('r'));
+  ok(facing() === 2, 'tapping R turns it one step clockwise');
+  comp.onWinKeyDown(key('R', { shiftKey: true })); comp.onWinKeyUp(key('R'));
+  ok(facing() === 1, 'Shift+R turns it back');
+
+  // Esc puts it back with no Undo step left behind
+  u0 = undos();
+  comp.onWinKeyDown(key('r')); comp.aimToward(0);
+  ok(facing() === 0, 'pointing up turns it north');
+  comp.onWinKeyDown(key('Escape'));
+  ok(!comp.aim && facing() === 1 && undos() === u0, 'Esc puts it back and leaves no Undo step');
+
+  // Arrow keys point it while R is held; held-key repeats are ignored
+  comp.onWinKeyDown(key('r'));
+  comp.onWinKeyDown(key('r', { repeat: true }));
+  comp.onWinKeyDown(key('ArrowDown'));
+  comp.onWinKeyUp(key('r'));
+  ok(facing() === 2, 'arrow keys point it while R is held');
+
+  // The selected part is used when the mouse is not over a part that can turn
+  comp.state.hover = D8; comp.state.sel = R5;
+  comp.onWinKeyDown(key('r'));
+  ok(comp.aim && comp.aim.i === R5, 'with the mouse over dust, R points the selected repeater');
+  comp.aimToward(1); comp.onWinKeyUp(key('r'));
+  ok(facing() === 1, 'and it turns');
+
+  // Holding a part with a direction over an empty square, R points the piece in your hand instead
+  comp.state.brush = 'repeater'; comp.state.hover = I(3, 3); comp.state.sel = R5;
+  comp.onWinKeyDown(key('r'));
+  ok(comp.aim && comp.aim.kind === 'brush' && comp.aim.i === I(3, 3), 'with a repeater in hand over an empty square, R points the one in your hand');
+  comp.onWinKeyDown(key('Escape'));
+  comp.state.brush = 'dust';
+
+  // Wall torch: only sides with a block behind
+  comp.state.hover = T11; comp.state.sel = -1;
+  comp.onWinKeyDown(key('r')); comp.aimToward(0);
+  ok(comp.sim.at(T11).f === 1, 'a torch will not point a way that has no block behind it');
+  comp.onWinKeyUp(key('r'));
+
+  // No part to turn: R turns the piece in your hand (tap) or points it (hold over an empty square)
+  comp.state.brush = 'observer'; comp.state.facing = 1;
+  comp.state.hover = -1; comp.state.sel = -1;
+  comp.onWinKeyDown(key('r')); comp.onWinKeyUp(key('r'));
+  ok(comp.state.facing === 2, 'tapping R with nothing to turn turns the piece in your hand');
+  comp.state.hover = I(2, 2);
+  comp.onWinKeyDown(key('r'));
+  ok(comp.aim && comp.aim.kind === 'brush' && comp.aim.i === I(2, 2), 'over an empty square, R points the piece in your hand');
+  comp.aimToward(3);
+  v = comp.renderVals();
+  ok(comp.state.facing === 3 && v.over.length >= 2, 'it turns, and its ghost and arrows are drawn on that square');
+  comp.onWinKeyUp(key('r'));
+  ok(/in your hand now faces west/.test(comp.state.notice), 'and says which way it faces now');
+
+  // Never steals R from text boxes or Ctrl+R
+  comp.onWinKeyDown(key('r', { target: { tagName: 'TEXTAREA' } }));
+  comp.onWinKeyDown(key('r', { ctrlKey: true }));
+  ok(!comp.aim && comp.state.facing === 3, 'R typed in the layout code box, or Ctrl+R, is left alone');
+
+  // Clicking the grid while R is held does nothing
+  comp.state.hover = R5;
+  comp.onWinKeyDown(key('r'));
+  let prevented = false;
+  comp.gDown({ button: 0, preventDefault() { prevented = true; }, clientX: 0, clientY: 0 });
+  ok(prevented && comp.sim.at(R5).d === 2, 'a click while R is held is ignored (the repeater delay did not change)');
+  comp.onWinBlur();
+  ok(!comp.aim, 'switching windows while R is held finishes the turn');
 }
 console.log(`\n${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);
