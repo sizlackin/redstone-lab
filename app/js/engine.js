@@ -19,7 +19,45 @@ const EV_EXTEND = 0, EV_CONTRACT = 1, EV_DROP = 2;
 const FULL_AMMO = 576;
 const ATTACH = { torch: true, lever: true, button: true, hook: true };
 /* Parts that face a direction and can be turned (Shift+click, the Turn button, or R). */
-const TURNABLE = { repeater: true, comparator: true, observer: true, piston: true, dispenser: true, torch: true, lever: true, button: true, hook: true };
+const TURNABLE = { repeater: true, comparator: true, observer: true, piston: true, dispenser: true, torch: true, lever: true, button: true, hook: true, hopper: true, dropper: true };
+
+/* ---- items ----
+   Things that can sit in chests, hoppers and droppers. stack = how many fit in one slot.
+   "filler" and "token" stand for renamed items: in the game a renamed item never stacks with a normal one,
+   so customers can't sneak them into a machine. */
+const ITEMS = {
+  diamond: { name: 'Diamond', plural: 'diamonds', stack: 64 },
+  dirt: { name: 'Dirt', plural: 'dirt', stack: 64 },
+  golden_apple: { name: 'Golden apple', plural: 'golden apples', stack: 64 },
+  token: { name: 'Token (renamed paper)', plural: 'tokens', stack: 64 },
+  filler: { name: 'Filler (renamed stick)', plural: 'fillers', stack: 64 },
+};
+const ITEM_IDS = Object.keys(ITEMS);
+/* How many slots each container has. */
+const INV_SIZE = { chest: 27, hopper: 5, dropper: 9 };
+const itemMax = (id) => (ITEMS[id] ? ITEMS[id].stack : 64);
+function newSlots(size, items) {
+  const slots = new Array(size).fill(null);
+  if (Array.isArray(items)) {
+    items.slice(0, size).forEach((it, k) => {
+      if (Array.isArray(it) && ITEMS[it[0]]) {
+        const n = Math.min(itemMax(it[0]), Math.max(0, Math.floor(Number(it[1]) || 1)));
+        if (n > 0) slots[k] = { id: it[0], n };
+      }
+    });
+  }
+  return slots;
+}
+const invEmpty = (slots) => slots.every((st) => !st);
+const invFull = (slots) => slots.every((st) => st && st.n >= itemMax(st.id));
+const invCount = (slots) => slots.reduce((a, st) => a + (st ? st.n : 0), 0);
+/* What a comparator reads from a container (Java: how full it is, 1-15; 0 only when completely empty). */
+function invSignal(slots) {
+  let f = 0;
+  for (const st of slots) if (st) f += st.n / itemMax(st.id);
+  f /= slots.length;
+  return f > 0 ? Math.floor(f * 14) + 1 : 0;
+}
 
 const TYPES = {
   block: { name: 'Solid Block', conductive: true, push: 'normal' },
@@ -41,6 +79,9 @@ const TYPES = {
   lamp: { name: 'Redstone Lamp', conductive: true, push: 'normal' },
   dispenser: { name: 'Dispenser', conductive: true, push: 'block' },
   bulb: { name: 'Copper Bulb', push: 'normal' },
+  chest: { name: 'Chest', push: 'block' },
+  hopper: { name: 'Hopper', push: 'block' },
+  dropper: { name: 'Dropper', conductive: true, push: 'block' },
 };
 const TYPE_INDEX = {};
 Object.keys(TYPES).forEach((k, n) => { TYPE_INDEX[k] = n; });
@@ -65,6 +106,9 @@ function makeCell(t, f, o) {
     case 'lamp': return { t, lit: false };
     case 'dispenser': return { t, f: D, trig: false, items: o.items == null ? FULL_AMMO : o.items, shots: 0 };
     case 'bulb': return { t, lit: !!o.lit, pw: false };
+    case 'chest': return { t, slots: newSlots(27, o.items) };
+    case 'hopper': return { t, f: D, slots: newSlots(5, o.items), cd: 0, tk: -1, locked: false, be: 0 };
+    case 'dropper': return { t, f: D, slots: newSlots(9, o.items), trig: false, out: 0, last: '' };
     default: return { t };
   }
 }
@@ -90,6 +134,8 @@ function cellKey(c) {
     case 'lamp': return 'lamp' + (c.lit ? 'L' : 'u');
     case 'dispenser': return 'disp' + c.f + (c.trig ? 'T' : 'u');
     case 'bulb': return 'bulb' + (c.lit ? 'L' : 'u') + (c.pw ? 'P' : 'u');
+    case 'hopper': return 'hop' + c.f + (c.locked ? 'L' : 'u');
+    case 'dropper': return 'drop' + c.f + (c.trig ? 'T' : 'u');
     default: return c.t;
   }
 }
@@ -104,6 +150,7 @@ const NAMES = {
   wooden_button: ['button', { wood: true }], pressure_plate: ['plate'], stone_pressure_plate: ['plate'], plate: ['plate'],
   tripwire_hook: ['hook'], hook: ['hook'], tripwire: ['string'], string: ['string'],
   lamp: ['lamp'], redstone_lamp: ['lamp'], dispenser: ['dispenser'], copper_bulb: ['bulb'], bulb: ['bulb'],
+  chest: ['chest'], hopper: ['hopper'], dropper: ['dropper'],
 };
 function parseFacing(s, dflt) {
   if (s == null || s === '') return dflt;
@@ -120,6 +167,8 @@ function createSim(W, H) {
     W, H, N, cells: new Array(N).fill(null), now: 0, seq: 0,
     sched: new Map(), running: new Set(), events: [], eventKeys: new Set(),
     handling: false, moverId: 0, changed: false, notices: [], fx: new Map(),
+    beSeq: 0, rand: 12345,
+    ground: new Map(), // items lying on the floor (dropped by droppers): square -> { item: count }
   };
   const nb = (i, d) => {
     if (i < 0) return -1;
@@ -305,7 +354,7 @@ function createSim(W, H) {
   function sturdy(n, face) {
     if (!n) return false;
     switch (n.t) {
-      case 'block': case 'glass': case 'rblock': case 'observer': case 'lamp': case 'dispenser': case 'bulb': return true;
+      case 'block': case 'glass': case 'rblock': case 'observer': case 'lamp': case 'dispenser': case 'bulb': case 'dropper': return true;
       case 'piston': return !n.ext || n.f !== face;
       default: return false;
     }
@@ -390,6 +439,7 @@ function createSim(W, H) {
     if (!n) return -1;
     if (n.t === 'dispenser') return n.items > 0 ? Math.floor((n.items / FULL_AMMO) * 14) + 1 : 0;
     if (n.t === 'bulb') return n.lit ? 15 : 0;
+    if (INV_SIZE[n.t]) return invSignal(n.slots);
     return -1;
   }
   function cmpRear(i, c) {
@@ -441,6 +491,101 @@ function createSim(W, H) {
       const want = cmpOn(i, c);
       if (c.on !== want) mut(i, (x) => { x.on = want; });
     }
+  }
+
+  /* ---- items: hoppers, droppers, chests (Java rules) ----
+     In this top-down view a hopper takes items from the container BEHIND it (in the game, the one above it)
+     and pushes them into the container it points at. */
+  const isInv = (c) => !!c && !!INV_SIZE[c.t];
+  function rnd(n) {
+    // Small repeatable random number generator, so a dropper picks its slot the same way every run.
+    let t = (S.rand = (S.rand + 0x6d2b79f5) | 0);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return (((t ^ (t >>> 14)) >>> 0) % n);
+  }
+  /* One item into a container, the way hoppers and droppers do it: into the first slot (in order) that is
+     empty or holds the same item with room left. A hopper that was empty gets an 8 gt pause before it moves it on. */
+  function insertOne(dc, id, src) {
+    const wasEmpty = invEmpty(dc.slots), max = itemMax(id);
+    for (let k = 0; k < dc.slots.length; k++) {
+      const st = dc.slots[k];
+      if (st && (st.id !== id || st.n >= max)) continue;
+      if (st) st.n++;
+      else dc.slots[k] = { id, n: 1 };
+      if (wasEmpty && dc.t === 'hopper') dc.cd = 8 - (src && src.t === 'hopper' && dc.tk >= src.tk ? 1 : 0);
+      S.changed = true;
+      return true;
+    }
+    return false;
+  }
+  function removeOne(c, k) {
+    const st = c.slots[k];
+    if (!st) return;
+    if (--st.n <= 0) c.slots[k] = null;
+    S.changed = true;
+  }
+  function hopperPush(i, c) {
+    const d = at(nb(i, c.f));
+    if (!isInv(d) || invFull(d.slots)) return false;
+    for (let k = 0; k < c.slots.length; k++) {
+      const st = c.slots[k];
+      if (st && insertOne(d, st.id, c)) { removeOne(c, k); return true; }
+    }
+    return false;
+  }
+  function hopperPull(i, c) {
+    const src = at(nb(i, opp(c.f)));
+    if (!isInv(src) || invEmpty(src.slots)) return false;
+    for (let k = 0; k < src.slots.length; k++) {
+      const st = src.slots[k];
+      if (st && insertOne(c, st.id, src)) { removeOne(src, k); return true; }
+    }
+    return false;
+  }
+  /* A hopper's turn in the block-entity phase: every 8 game ticks (0.4 s) it pushes one item, then pulls one.
+     A powered hopper is locked: it holds its items but other hoppers can still fill it or empty it. */
+  function hopperTick(i, c) {
+    c.cd--;
+    c.tk = S.now;
+    if (c.cd > 0) return false;
+    c.cd = 0;
+    if (c.locked) return false;
+    let moved = false;
+    if (!invEmpty(c.slots)) moved = hopperPush(i, c);
+    if (!invFull(c.slots)) moved = hopperPull(i, c) || moved;
+    if (moved) c.cd = 8;
+    return moved;
+  }
+  /* A dropper fires one item from a random filled slot: into a container in front of it,
+     or out onto the ground when there's no container there. */
+  function dropperFire(i, c) {
+    const filled = [];
+    c.slots.forEach((st, k) => { if (st) filled.push(k); });
+    if (!filled.length) { S.fx.set(i, { until: S.now + 6, kind: 'empty' }); return; }
+    const k = filled[rnd(filled.length)], id = c.slots[k].id;
+    const d = at(nb(i, c.f));
+    if (isInv(d)) {
+      if (insertOne(d, id, c)) { removeOne(c, k); S.fx.set(i, { until: S.now + 6, kind: 'pass', item: id }); }
+      return;
+    }
+    removeOne(c, k);
+    c.out++;
+    c.last = id;
+    const g = nb(i, c.f);
+    if (g >= 0) {
+      const pile = S.ground.get(g) || {};
+      pile[id] = (pile[id] || 0) + 1;
+      S.ground.set(g, pile);
+    }
+    S.fx.set(i, { until: S.now + 10, kind: 'drop', item: id });
+  }
+  /* A player picks up everything lying on a square. Returns { item id: count }, or null if nothing is there. */
+  function pickUp(i) {
+    const pile = S.ground.get(i);
+    if (!pile) return null;
+    S.ground.delete(i);
+    return pile;
   }
 
   /* ---- pistons ---- */
@@ -495,7 +640,7 @@ function createSim(W, H) {
     }
   }
   function mover(carry, dir, ext, src) {
-    return { t: 'moving', id: ++S.moverId, carry, dir, ext, src, prog: 0, progO: 0, last: -1 };
+    return { t: 'moving', id: ++S.moverId, be: ++S.beSeq, carry, dir, ext, src, prog: 0, progO: 0, last: -1 };
   }
   function moveBlocks(i, f, extending, sticky) {
     const h = nb(i, f);
@@ -561,17 +706,20 @@ function createSim(W, H) {
     m.progO = 1;
     land(i, m, true);
   }
-  function tickMovers() {
+  /* Block-entity phase: moving piston blocks and hoppers, in the order they were made (like Java). */
+  function tickBlockEntities() {
     const list = [];
-    for (let i = 0; i < N; i++) { const c = S.cells[i]; if (c && c.t === 'moving') list.push(i); }
+    for (let i = 0; i < N; i++) { const c = S.cells[i]; if (c && (c.t === 'moving' || c.t === 'hopper')) list.push(i); }
     if (!list.length) return;
-    list.sort((a, b) => S.cells[a].id - S.cells[b].id);
+    const order = new Map(list.map((i) => [i, S.cells[i]]));
+    list.sort((a, b) => order.get(a).be - order.get(b).be);
     for (const i of list) {
-      const m = S.cells[i];
-      if (!m || m.t !== 'moving') continue;
-      m.last = S.now;
-      m.progO = m.prog;
-      if (m.progO >= 1) { land(i, m, false); settle(); } else m.prog = Math.min(1, m.prog + 0.5);
+      const c = S.cells[i];
+      if (!c || c !== order.get(i)) continue;
+      if (c.t === 'hopper') { if (hopperTick(i, c)) settle(); continue; }
+      c.last = S.now;
+      c.progO = c.prog;
+      if (c.progO >= 1) { land(i, c, false); settle(); } else c.prog = Math.min(1, c.prog + 0.5);
     }
   }
   function runEvents() {
@@ -607,10 +755,15 @@ function createSim(W, H) {
           case 'repeater': repCheck(i, c); break;
           case 'comparator': cmpCheck(i, c); break;
           case 'piston': pistonCheck(i, c); break;
-          case 'dispenser': {
+          case 'dispenser': case 'dropper': {
             const p = hasSignal(i);
             if (p && !c.trig) { schedule(i, 4, PRI_NORMAL); mut(i, (x) => { x.trig = true; }); }
             else if (!p && c.trig) mut(i, (x) => { x.trig = false; });
+            break;
+          }
+          case 'hopper': {
+            const p = hasSignal(i);
+            if (p !== c.locked) mut(i, (x) => { x.locked = p; });
             break;
           }
           case 'bulb': {
@@ -639,6 +792,7 @@ function createSim(W, H) {
         if (c.items > 0) { c.items--; c.shots++; S.fx.set(i, { until: S.now + 6, kind: 'shot' }); S.changed = true; }
         else S.fx.set(i, { until: S.now + 6, kind: 'empty' });
         break;
+      case 'dropper': dropperFire(i, c); break;
       case 'button': if (c.on) mut(i, (x) => { x.on = false; }); break;
       case 'plate': case 'string':
         if (c.on) {
@@ -679,7 +833,7 @@ function createSim(W, H) {
     runScheduled();
     runEvents();
     entities();
-    tickMovers();
+    tickBlockEntities();
     for (const [i, e] of S.fx) if (e.until <= S.now) S.fx.delete(i);
   }
 
@@ -700,8 +854,10 @@ function createSim(W, H) {
       }
     }
     const c = makeCell(t, ff, o);
+    if (t === 'hopper') c.be = ++S.beSeq;
     setCell(i, c);
-    if (t === 'dispenser') c.trig = hasSignal(i);
+    if (t === 'dispenser' || t === 'dropper') c.trig = hasSignal(i);
+    if (t === 'hopper') c.locked = hasSignal(i);
     if (t === 'repeater' && repInput(i, c) > 0) schedule(i, 1, PRI_NORMAL);
     settle();
     return true;
@@ -736,6 +892,56 @@ function createSim(W, H) {
     settle();
     return true;
   }
+  /* A player puts n items into a container by hand (like shift-clicking them in): first topping up stacks of
+     the same item, then filling empty slots. Returns how many fit. */
+  function giveItems(i, id, n) {
+    const c = at(i);
+    if (!isInv(c) || !ITEMS[id]) return 0;
+    const max = itemMax(id);
+    let left = Math.max(0, n | 0);
+    const wasEmpty = invEmpty(c.slots);
+    for (const pass of [0, 1]) {
+      for (let k = 0; k < c.slots.length && left > 0; k++) {
+        const st = c.slots[k];
+        if (pass === 0 && st && st.id === id && st.n < max) { const m = Math.min(left, max - st.n); st.n += m; left -= m; }
+        if (pass === 1 && !st) { const m = Math.min(left, max); c.slots[k] = { id, n: m }; left -= m; }
+      }
+    }
+    const added = (n | 0) - left;
+    if (added > 0) {
+      if (wasEmpty && c.t === 'hopper' && c.cd < 8) c.cd = 8;
+      S.changed = true;
+      settle();
+    }
+    return added;
+  }
+  /* A player takes everything out. Returns { item id: count }. */
+  function takeAll(i) {
+    const c = at(i), got = {};
+    if (!isInv(c)) return got;
+    c.slots.forEach((st) => { if (st) got[st.id] = (got[st.id] || 0) + st.n; });
+    c.slots.fill(null);
+    S.changed = true;
+    settle();
+    return got;
+  }
+  /* Takes up to n of one item back out (used to change the number of tokens). Returns how many. */
+  function takeItems(i, id, n) {
+    const c = at(i);
+    if (!isInv(c)) return 0;
+    let left = n | 0;
+    for (let k = c.slots.length - 1; k >= 0 && left > 0; k--) {
+      const st = c.slots[k];
+      if (!st || st.id !== id) continue;
+      const m = Math.min(left, st.n);
+      st.n -= m;
+      left -= m;
+      if (st.n <= 0) c.slots[k] = null;
+    }
+    const took = (n | 0) - left;
+    if (took > 0) { S.changed = true; settle(); }
+    return took;
+  }
   function setDelay(i, d) {
     const c = at(i);
     if (!c || c.t !== 'repeater' || c.d === d) return false;
@@ -767,6 +973,7 @@ function createSim(W, H) {
       case 'observer': setCell(i, makeCell('observer', f)); break;
       case 'dispenser': setCell(i, makeCell('dispenser', f, { items: c.items })); break;
       case 'piston': setCell(i, makeCell('piston', f, { sticky: c.sticky })); break;
+      case 'hopper': case 'dropper': setCell(i, Object.assign({}, c, { f })); break;
       default: setCell(i, makeCell(c.t, f, { wood: c.wood, on: c.t === 'lever' ? c.on : false })); break;
     }
     settle();
@@ -789,8 +996,53 @@ function createSim(W, H) {
     return false;
   }
 
+  /* A freshly loaded build starts in the state it would rest in, like a saved world: comparators, repeaters,
+     torches and lamps already match their inputs, and powered droppers, hoppers and bulbs don't react to
+     power they already had. Without this a machine could trip over itself at 0 s (a copper bulb would toggle,
+     a dropper would fire). Clocks still start, because anything not at rest gets its tick scheduled after. */
+  function restState() {
+    for (let it = 0; it < 40; it++) {
+      let changed = false;
+      updateHooks();
+      updateDust();
+      for (let i = 0; i < N; i++) {
+        const c = S.cells[i];
+        if (!c) continue;
+        if (c.t === 'comparator') {
+          const o = cmpOut(i, c), on = cmpOn(i, c);
+          if (c.out !== o || c.on !== on) { c.out = o; c.on = on; changed = true; }
+        } else if (c.t === 'repeater') {
+          c.lock = repLocked(i, c);
+          const on = repInput(i, c) > 0;
+          if (!c.lock && c.on !== on) { c.on = on; changed = true; }
+        } else if (c.t === 'torch') {
+          const lit = !torchPowered(i, c);
+          if (c.lit !== lit) { c.lit = lit; changed = true; }
+        } else if (c.t === 'lamp') {
+          const lit = hasSignal(i);
+          if (c.lit !== lit) { c.lit = lit; changed = true; }
+        }
+      }
+      if (!changed) break;
+    }
+    for (let i = 0; i < N; i++) {
+      const c = S.cells[i];
+      if (!c) continue;
+      if (c.t === 'bulb') c.pw = hasSignal(i);
+      else if (c.t === 'dropper' || c.t === 'dispenser') c.trig = hasSignal(i);
+      else if (c.t === 'hopper') c.locked = hasSignal(i);
+    }
+    S.sched.clear();
+  }
+
   /* ---- saving and loading layouts ---- */
   function fname(f) { return f < 0 ? 'floor' : DN[f]; }
+  /* Container contents as [[item, count], null, ...] in slot order, without trailing empty slots. */
+  function packSlots(slots) {
+    const out = slots.map((st) => (st ? [st.id, st.n] : null));
+    while (out.length && !out[out.length - 1]) out.pop();
+    return out;
+  }
   function serialize() {
     const out = [];
     for (let i = 0; i < N; i++) {
@@ -814,6 +1066,9 @@ function createSim(W, H) {
         case 'string': out.push(['tripwire', x, y]); break;
         case 'dispenser': out.push(['dispenser', x, y, DN[c.f]]); break;
         case 'bulb': out.push(['copper_bulb', x, y]); break;
+        case 'chest': out.push(['chest', x, y, '', packSlots(c.slots)]); break;
+        case 'hopper': out.push(['hopper', x, y, DN[c.f], packSlots(c.slots)]); break;
+        case 'dropper': out.push(['dropper', x, y, DN[c.f], packSlots(c.slots)]); break;
         case 'rblock': out.push(['redstone_block', x, y]); break;
         case 'lamp': out.push(['lamp', x, y]); break;
         default: out.push([c.t, x, y]); break;
@@ -830,6 +1085,10 @@ function createSim(W, H) {
     S.fx.clear();
     S.notices.length = 0;
     S.now = 0;
+    S.beSeq = 0;
+    S.moverId = 0;
+    S.rand = 12345;
+    S.ground.clear();
     let bad = 0;
     const list = data && Array.isArray(data.cells) ? data.cells : [];
     for (const r of list) {
@@ -839,20 +1098,25 @@ function createSim(W, H) {
       if (!spec || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= W || y >= H) { bad++; continue; }
       const t = spec[0], o = Object.assign({}, spec[1] || {});
       let f = -1;
-      if (t === 'repeater' || t === 'comparator' || t === 'observer' || t === 'piston' || t === 'hook' || t === 'dispenser') f = parseFacing(r[3], 1);
+      if (t === 'repeater' || t === 'comparator' || t === 'observer' || t === 'piston' || t === 'hook' || t === 'dispenser' || t === 'hopper' || t === 'dropper') f = parseFacing(r[3], 1);
       else if (t === 'torch' || t === 'lever' || t === 'button') f = parseFacing(r[3], -1);
       if (t === 'repeater') o.d = Math.min(4, Math.max(1, Number(r[4]) || 1));
       if (t === 'comparator') o.sub = String(r[4] || '').toLowerCase().indexOf('sub') === 0;
       if (t === 'lever') o.on = String(r[4] || '').toLowerCase() === 'on';
       if (t === 'dust') o.dot = String(r[3] || '').toLowerCase() === 'dot';
-      S.cells[y * W + x] = makeCell(t, f, o);
+      if (INV_SIZE[t]) o.items = r[4];
+      const c = makeCell(t, f, o);
+      if (t === 'hopper') c.be = ++S.beSeq;
+      S.cells[y * W + x] = c;
     }
+    restState();
     settle();
     return bad;
   }
 
   return {
     S, W, H, N, nb, at, step, settle, place, erase, use, rotate, setFacing, facingOptions, setDelay, load, serialize,
+    giveItems, takeAll, takeItems, pickUp,
     blockPower, signalFrom, hasSignal, repInput, repLocked, cmpRear, cmpSide, cmpOut, pistonPowered,
     torchPowered, sturdy, supported, wallOptions, pendingAt, analog, linksOf,
   };

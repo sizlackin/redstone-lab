@@ -33,6 +33,11 @@ const PALETTE = [
     { id: 'dispenser', name: 'Dispenser', t: 'dispenser', dir: true },
     { id: 'bulb', name: 'Copper bulb', t: 'bulb' },
   ] },
+  { title: 'Items', items: [
+    { id: 'chest', name: 'Chest', t: 'chest' },
+    { id: 'hopper', name: 'Hopper', t: 'hopper', dir: true },
+    { id: 'dropper', name: 'Dropper', t: 'dropper', dir: true },
+  ] },
   { title: 'Tools', items: [{ id: 'eraser', name: 'Eraser', t: 'eraser' }] },
 ];
 const BRUSH = {};
@@ -51,6 +56,8 @@ function facingHint(b, f) {
     case 'observer': return 'Watches ' + w + '. The pulse comes out the back.';
     case 'piston': return 'Pushes ' + w + '.';
     case 'dispenser': return 'Shoots ' + w + '.';
+    case 'hopper': return 'Pushes items ' + w + '. Takes them from behind.';
+    case 'dropper': return 'Drops items ' + w + '.';
     case 'hook': return 'Points ' + w + ' at the string. Needs a block behind it.';
     case 'torch': case 'lever': case 'button': return 'Hangs on a block, facing ' + w + '. No block? It goes on the floor.';
     case 'eraser': return 'Click or drag over parts to remove them.';
@@ -75,6 +82,17 @@ function facingWords(what, f, t) {
     case 'dispenser': return 'The dispenser now shoots ' + w + '.';
     default: return 'The ' + what + ' now points ' + w + '.';
   }
+}
+/* "1 golden apple", "5 diamonds". */
+function itemWords(id, n) {
+  const it = ITEMS[id];
+  if (!it) return n + ' ' + id;
+  return n + ' ' + (n === 1 ? it.name.replace(/ \(.*\)$/, '').toLowerCase() : it.plural);
+}
+/* "2 golden apples and 1 diamond" from { golden_apple: 2, diamond: 1 }. */
+function pileWords(pile) {
+  const parts = Object.keys(pile).filter((id) => pile[id] > 0).map((id) => itemWords(id, pile[id]));
+  return parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0] || 'nothing';
 }
 /* True while you're typing in a text box, so letters like R keep working there. */
 function typingIn(el) {
@@ -114,6 +132,10 @@ class RedstoneLab extends PreactComponent {
     this.palette = PALETTE.map((g) => ({ title: g.title, items: g.items.map((it) => this.makePalItem(it)) }));
     this.libFns = {};
     this.stepFns = {};
+    this.shopFns = {
+      pay1: () => this.payShop('diamond', 1), pay5: () => this.payShop('diamond', 5), payDirt: () => this.payShop('dirt', 1),
+      cheaper: () => this.setShopPrice(-1), dearer: () => this.setShopPrice(1),
+    };
     this.bg = gridPaths();
     this.applyConcept('tripwire-clock');
   }
@@ -273,10 +295,16 @@ class RedstoneLab extends PreactComponent {
     } else if (shift) {
       if (c) { this.snapshot(); if (!sim.rotate(i)) this.undoStack.pop(); }
     } else if (c) {
-      sim.use(i);
+      const coin = this.shopCell('pay');
+      if (i === coin) this.payShop('diamond', 1);
+      else if (INV_SIZE[c.t]) sim.S.notices.push('To put items in or take them out, use the buttons in the panel on the right.');
+      else sim.use(i);
       if (!this.state.playing && (c.t === 'string' || c.t === 'plate' || c.t === 'button')) {
         sim.S.notices.push('The simulation is paused. Press Play or step forward to see it react.');
       }
+    } else if (sim.S.ground.has(i)) {
+      const got = sim.pickUp(i);
+      sim.S.notices.push('You picked up ' + pileWords(got) + '.');
     } else {
       this.snapshot();
       if (!this.placeAt(i)) this.undoStack.pop();
@@ -378,6 +406,77 @@ class RedstoneLab extends PreactComponent {
   useCell(i) { this.sim.use(i); this.refresh(); }
   turnCell(i, back) { this.snapshot(); if (!this.sim.rotate(i, back)) this.undoStack.pop(); this.refresh(); }
   deleteCell(i) { this.snapshot(); this.sim.erase(i); this.refresh(); }
+
+  /* ---- Items: putting them in, taking them out, and the shop panel ---- */
+  giveTo(i, id, n) {
+    this.snapshot();
+    const k = this.sim.giveItems(i, id, n);
+    if (!k) { this.undoStack.pop(); this.flash('There’s no room for ' + itemWords(id, n) + ' in there.'); }
+    else this.flash('Put ' + itemWords(id, k) + ' into the ' + shortName(this.sim.at(i)).toLowerCase() + '.');
+    this.refresh();
+  }
+  takeAllFrom(i) {
+    this.snapshot();
+    const got = this.sim.takeAll(i);
+    this.flash(Object.keys(got).length ? 'Took out ' + pileWords(got) + '.' : 'It was already empty.');
+    this.refresh();
+  }
+  invView(slots) {
+    return slots.map((st) => (st ? { icon: itemIcon(st.id, 0, 0, 40), n: st.n, name: ITEMS[st.id].name } : null));
+  }
+  /* A square named in the concept's shop settings ('pay', 'price', 'payout', 'bank' or 'stock'), or -1. */
+  shopCell(key) {
+    const sh = this.concept().shop;
+    return sh && sh[key] ? sh[key][1] * GW + sh[key][0] : -1;
+  }
+  shopCount(key, id) {
+    const c = this.sim.at(this.shopCell(key));
+    return c && c.slots ? c.slots.reduce((a, st) => a + (st && st.id === id ? st.n : 0), 0) : 0;
+  }
+  /* The price is the number of tokens in the counter dropper plus the hopper it drops them into. */
+  shopPrice() {
+    const t = this.shopCell('price'), c = this.sim.at(t);
+    if (!c || !c.slots) return 0;
+    const q = this.sim.at(this.sim.nb(t, c.f));
+    const tok = (x) => (x && x.slots ? x.slots.reduce((a, st) => a + (st && st.id === 'token' ? st.n : 0), 0) : 0);
+    return tok(c) + tok(q);
+  }
+  /* Diamonds in the bank chest, plus any on their way in (in a hopper pointing into it). */
+  shopBank() {
+    const b = this.shopCell('bank');
+    if (b < 0) return 0;
+    let n = this.shopCount('bank', 'diamond');
+    for (let d = 0; d < 4; d++) {
+      const j = this.sim.nb(b, d), c = this.sim.at(j);
+      if (c && c.t === 'hopper' && this.sim.nb(j, c.f) === b) n += c.slots.reduce((a, st) => a + (st && st.id === 'diamond' ? st.n : 0), 0);
+    }
+    return n;
+  }
+  /* Golden apples still in the machine: the stock chest, the hopper under it and the payout dropper. */
+  shopStock() {
+    return this.sim.S.cells.reduce((a, c) => a + (c && c.slots ? c.slots.reduce((b, st) => b + (st && st.id === 'golden_apple' ? st.n : 0), 0) : 0), 0);
+  }
+  payShop(id, n) {
+    const coin = this.shopCell('pay');
+    if (coin < 0 || !this.sim.at(coin)) { this.flash('The coin slot is gone. Press Reset to rebuild the shop.'); return; }
+    const k = this.sim.giveItems(coin, id, n);
+    if (!k) this.flash('The coin slot is full.');
+    else if (id === 'diamond') this.flash('Paid ' + itemWords('diamond', k) + ' into the coin slot.');
+    else this.flash('Put ' + itemWords(id, k) + ' into the coin slot. Watch: the filter won’t take it.');
+    if (!this.state.playing) this.sim.S.notices.push('The simulation is paused. Press Play or step forward to see it react.');
+    this.refresh();
+  }
+  setShopPrice(delta) {
+    const t = this.shopCell('price'), c = this.sim.at(t);
+    if (!c || !c.slots) { this.flash('The counter dropper is gone. Press Reset to rebuild the shop.'); return; }
+    const price = this.shopPrice(), inT = this.shopCount('price', 'token');
+    if (inT !== price) { this.flash('The counter is in the middle of a sale (some tokens are out of the counter dropper). Finish paying, or press Reset, then change the price.'); return; }
+    if (price + delta < 2) { this.flash('This counter needs a price of at least 2. (For a price of 1, skip the counter: run the pulse line straight to the payout dropper.)'); return; }
+    if (price + delta > 20) { this.flash('Let’s keep the price at 20 diamonds or less.'); return; }
+    if (delta > 0) this.sim.giveItems(t, 'token', delta); else this.sim.takeItems(t, 'token', -delta);
+    this.flash('The price is now ' + itemWords('diamond', price + delta) + ' (' + (price + delta) + ' tokens in the counter dropper).');
+    this.refresh();
+  }
 
   /* ================= Turning parts with R =================
      Tap R: the part under the mouse (or the selected part) turns to its next direction. Shift+R turns it back.
@@ -583,6 +682,12 @@ class RedstoneLab extends PreactComponent {
       case 'comparator': extra = String(c.out); break;
       case 'torch': extra = c.burnt ? 'B' : ''; break;
       case 'moving': extra = (c.carry ? cellKey(c.carry) : '-') + c.dir; break;
+      case 'chest': case 'hopper': case 'dropper': {
+        const sm = invSummary(c.slots);
+        if (c.t === 'dropper') ctx.fx = sim.S.fx.get(i) || null;
+        extra = (sm.top || '-') + sm.total + (ctx.fx ? ctx.fx.kind + (ctx.fx.item || '') : '');
+        break;
+      }
       default: break;
     }
     const key = cellKey(c) + '|' + extra + '|' + (nums ? 1 : 0);
@@ -632,6 +737,14 @@ class RedstoneLab extends PreactComponent {
     const line = (t) => out.lines.push(t);
     const act = (label, fn, on) => out.actions.push({ label, run: fn, on: !!on, cls: on ? 'act act-on' : 'act' });
     if (!c) {
+      const pile = sim.S.ground.get(i);
+      if (pile) {
+        out.name = 'Items on the ground';
+        out.icon = groundSprite(pile);
+        line(pileWords(pile).replace(/^./, (m) => m.toUpperCase()) + ', dropped here. Click the square to pick them up.');
+        act('Pick up', () => { const got = sim.pickUp(i); this.flash('You picked up ' + pileWords(got) + '.'); this.refresh(); });
+        return out;
+      }
       out.name = 'Empty square';
       line('Pick a part on the left, then click here to place it. You can also drag a part straight onto the grid.');
       return out;
@@ -786,6 +899,32 @@ class RedstoneLab extends PreactComponent {
         line('Each NEW pulse of power flips it: off to on, or on to off. Keeping the power on does nothing extra.');
         line('A comparator reading it gives 15 while it is lit. Together they make a toggle (T flip-flop).');
         break;
+      case 'chest': case 'hopper': case 'dropper': {
+        const sm = invSummary(c.slots), sig = invSignal(c.slots);
+        out.inv = this.invView(c.slots);
+        out.invCols = c.slots.length === 27 ? 9 : c.slots.length === 9 ? 3 : 5;
+        if (i === this.shopCell('pay')) line('This is the shop’s coin slot. Click it to pay one diamond.');
+        chip(sm.total ? sm.total + (sm.total === 1 ? ' item' : ' items') : 'Empty', sm.total ? 'info' : 'off');
+        chip('Comparator reads ' + sig, sig ? 'on' : 'off');
+        if (c.t === 'hopper') {
+          chip(c.locked ? 'Locked (powered)' : 'Moving items', c.locked ? 'warm' : 'off');
+          line('Every 0.4 s it pushes one item into the container its arrow points at, then takes one from the container behind it. In the game, that’s the container above it.');
+          line('Power locks it: it keeps its items, but other hoppers can still fill it or take from it.');
+          turn = true;
+        } else if (c.t === 'dropper') {
+          chip(c.trig ? 'Powered' : 'Idle', c.trig ? 'on' : 'off');
+          if (c.out) chip(c.out + ' dropped');
+          line('Each new pulse of power makes it drop one item from a random slot, 0.2 s later: into a container in front of it, or out onto the ground.');
+          turn = true;
+        } else {
+          line('Holds 27 stacks. Hoppers can fill it and empty it, and a comparator behind it reads how full it is.');
+        }
+        act('+1 diamond', () => this.giveTo(i, 'diamond', 1));
+        act('+5 diamonds', () => this.giveTo(i, 'diamond', 5));
+        act('+1 dirt', () => this.giveTo(i, 'dirt', 1));
+        if (sm.total) act('Take everything', () => this.takeAllFrom(i));
+        break;
+      }
       default: break;
     }
     if (turn) {
@@ -802,6 +941,7 @@ class RedstoneLab extends PreactComponent {
 
     const cells = [];
     for (let i = 0; i < S.N; i++) { const c = S.cells[i]; if (c) cells.push({ tr: cellTr(i), p: this.visual(i, c) }); }
+    for (const [gi, pile] of S.ground) if (!S.cells[gi]) cells.push({ tr: cellTr(gi), p: groundSprite(pile) });
     const under = [], over = [];
     const stepIdx = st.stepHover >= 0 ? st.stepHover : st.step;
     const step = cp.steps && cp.steps[stepIdx];
@@ -857,6 +997,7 @@ class RedstoneLab extends PreactComponent {
         : cp.blurb,
       tryIt: cp.tryIt || '',
       hasWalk: !!cp.walk,
+      hasShop: !!cp.shop,
       hasSteps: !!(cp.steps && cp.steps.length),
       steps: (cp.steps || []).map((s, k) => {
         const h = this.stepFn(k), on = k === st.step;
@@ -889,7 +1030,9 @@ class RedstoneLab extends PreactComponent {
       timeText: (S.now / 20).toFixed(1) + ' s',
       tickText: 'game tick ' + S.now,
       quickOn: st.quick, hideQuick: this.hideQuick,
-      quick1: cp.walk ? 'Press “Walk into the tripwire” on the right to watch the clock run.' : 'Pick a concept from the library under the grid, or start building.',
+      quick1: cp.walk ? 'Press “Walk into the tripwire” on the right to watch the clock run.'
+        : cp.shop ? 'Press “Pay 1 diamond” on the right and follow the diamond through the shop.'
+        : 'Pick a concept from the library under the grid, or start building.',
 
       palette,
       brushName: b.name,
@@ -918,6 +1061,15 @@ class RedstoneLab extends PreactComponent {
       cpt,
       toggleWalk: this.toggleWalk,
       walkLabel: standing ? 'Step out of the tripwire' : 'Walk into the tripwire',
+      shop: cp.shop ? {
+        price: this.shopPrice(),
+        sold: (() => { const c = sim.at(this.shopCell('payout')); return c && c.t === 'dropper' ? c.out : 0; })(),
+        bank: this.shopBank(),
+        stock: this.shopStock(),
+        pay1: this.shopFns.pay1, pay5: this.shopFns.pay5, payDirt: this.shopFns.payDirt,
+        cheaper: this.shopFns.cheaper, dearer: this.shopFns.dearer,
+        icon: itemIcon('diamond', 0, 0, 40),
+      } : null,
       walkCls: standing ? 'walk-on' : '',
       stepTag: shown ? 'Step ' + (stepIdx + 1) + ' of ' + nSteps : 'Start here',
       stepTitle: shown ? shown.title : 'Walk through it one step at a time',
@@ -1109,6 +1261,7 @@ function viewGridHelp(v) {
       ${meaning(badge('4', 'width: 18px; border-radius: 4px; background: #a9a9a9; color: #a3120a; font-weight: 700'), 'a repeater’s wait (4 = 0.4 s)')}
       ${meaning(badge('1', 'width: 18px; border-radius: 4px; background: #ffd08a; color: #2a1d08'), 'a part graphed on the timeline')}
       ${meaning(badge('3', 'width: 18px; border-radius: 50%; background: #5cc8ff; color: #0b1820'), 'the “How it works” step you’re on')}
+      ${meaning(badge('18', 'min-width: 22px; padding: 0 3px; box-sizing: border-box; border-radius: 4px; background: #3a3f48; color: #ffffff; text-shadow: 1px 1px 0 #111'), 'items inside a chest, hopper or dropper')}
     </div>
   </div>
   <div role="status" aria-live="polite" style="min-height: 21px; font-size: 14px; color: #ffd08a">${v.notice}</div>`;
@@ -1167,7 +1320,8 @@ function viewLibrary(v) {
           <p style="margin: 0">One layer, seen from above: dust can’t climb blocks, torches can’t sit on top of blocks, and there’s no quasi-connectivity (pistons powered from the space above them).</p>
           <p style="margin: 0">When two separate wires change in the very same game tick, the exact order Java updates them in can differ here. That only matters for race-condition builds.</p>
           <p style="margin: 0">Erasing tripwire works like cutting it with shears. In the game, breaking string by hand triggers the hooks for 0.5 s.</p>
-          <p style="margin: 0">Not in the parts list yet: hoppers, chests, slime and honey blocks, rails, note blocks, targets, daylight sensors. Ask for any of them.</p>
+          <p style="margin: 0">Hoppers: in the game a hopper takes items from the container above it. Seen from above, here it takes them from the container behind its arrow instead.</p>
+          <p style="margin: 0">Not in the parts list yet: slime and honey blocks, rails, note blocks, targets, daylight sensors, crafters. Ask for any of them.</p>
         </div>
       </details>
     </div>
@@ -1192,6 +1346,14 @@ function viewInspector(v) {
     <div style="display: flex; flex-wrap: wrap; gap: 6px">
       ${insp.chips.map((ch) => html`<span class=${ch.cls}>${ch.t}</span>`)}
     </div>
+    ${insp.inv ? html`
+      <div role="list" aria-label="What's inside" style=${`display: grid; grid-template-columns: repeat(${insp.invCols}, 30px); gap: 3px`}>
+        ${insp.inv.map((st) => html`
+          <div role="listitem" title=${st ? st.n + ' × ' + st.name : 'Empty slot'} style="position: relative; width: 30px; height: 30px; box-sizing: border-box; border-radius: 4px; background: #2a2f38; border: 1px solid #3b414d">
+            ${st ? html`<svg width="26" height="26" viewBox="0 0 40 40" aria-hidden="true" style="position: absolute; left: 1px; top: 1px">${paths(st.icon)}</svg>
+              <span style="position: absolute; right: 2px; bottom: 0; font-size: 11px; font-weight: 700; color: #ffffff; text-shadow: 1px 1px 0 #1a1a1a">${st.n > 1 ? st.n : ''}</span>` : null}
+          </div>`)}
+      </div>` : null}
     <div style="display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #d6d9df">
       ${insp.lines.map((ln) => html`<p style="margin: 0">${ln}</p>`)}
     </div>
@@ -1199,6 +1361,36 @@ function viewInspector(v) {
       ${insp.actions.map((a) => html`<button onClick=${a.run} class=${a.cls} aria-pressed=${a.on}>${a.label}</button>`)}
     </div>
   </section>`;
+}
+
+/* The shop's controls: pay, change the price, and what's been sold so far. */
+function viewShop(sh) {
+  const SHOPBTN = 'display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #2d7a62; background: #133227; color: #c9f5e4; font-size: 14px; font-weight: 700; cursor: pointer';
+  const SMALL = 'width: 30px; height: 30px; border-radius: 7px; border: 1px solid #2d7a62; background: #133227; color: #c9f5e4; font-size: 17px; line-height: 1; cursor: pointer';
+  const stat = (n, label) => html`<span><b style="color: #ffffff">${n}</b> ${label}</span>`;
+  return html`
+  <div style="display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 10px; background: #0f2019; border: 1px solid #245a49">
+    <div style="display: flex; flex-wrap: wrap; gap: 6px">
+      <button onClick=${sh.pay1} class="hv-shop" style=${SHOPBTN}>
+        <svg width="18" height="18" viewBox="0 0 40 40" aria-hidden="true">${paths(sh.icon)}</svg>
+        <span>Pay 1 diamond</span>
+      </button>
+      <button onClick=${sh.pay5} class="hv-shop" style=${SHOPBTN}>Pay 5</button>
+      <button onClick=${sh.payDirt} class="hv-shop" style=${SHOPBTN.replace('font-weight: 700', 'font-weight: 400')}>Try paying with dirt</button>
+    </div>
+    <div style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #c9f5e4">
+      <span>Price:</span>
+      <button onClick=${sh.cheaper} class="hv-shop" aria-label="Lower the price" title="Lower the price" style=${SMALL}>−</button>
+      <span style="min-width: 86px; text-align: center; font-weight: 700; color: #ffffff">${sh.price} diamonds</span>
+      <button onClick=${sh.dearer} class="hv-shop" aria-label="Raise the price" title="Raise the price" style=${SMALL}>+</button>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: #9fd8c3">
+      ${stat(sh.sold, sh.sold === 1 ? 'golden apple sold' : 'golden apples sold')}
+      ${stat(sh.bank, sh.bank === 1 ? 'diamond in the bank' : 'diamonds in the bank')}
+      ${stat(sh.stock, 'golden apples in stock')}
+    </div>
+    <span style="font-size: 13px; color: #9fd8c3">You can also click the coin slot to pay, and click the golden apples on the ground to pick them up.</span>
+  </div>`;
 }
 
 function viewConcept(v) {
@@ -1216,6 +1408,7 @@ function viewConcept(v) {
         </button>
         <span style="font-size: 13px; color: #e8d6b5">${cpt.tryIt}</span>
       </div>` : null}
+    ${cpt.hasShop ? viewShop(v.shop) : null}
     ${cpt.hasSteps ? html`
       <div style="display: flex; flex-direction: column; gap: 8px">
         <div style="font-size: 13px; color: #a8adb7">How it works, one step at a time. Each step lights up its parts on the grid.</div>

@@ -19,7 +19,7 @@ const fakeWindow = {
   localStorage: { getItem: () => null, setItem: () => {} },
   location: { search: '' },
 };
-const mod = new Function('window', src + '\n;return { createSim, CONCEPTS, RedstoneLab, makeCell, cellKey, drawPart, GW, GH, PALETTE, dirToward, aimMark };')(fakeWindow);
+const mod = new Function('window', src + '\n;return { createSim, CONCEPTS, RedstoneLab, makeCell, cellKey, drawPart, GW, GH, PALETTE, dirToward, aimMark, invSignal };')(fakeWindow);
 const { createSim, CONCEPTS, GW } = mod;
 const Component = mod.RedstoneLab;
 
@@ -432,6 +432,142 @@ function run(s, n, fn) { const out = []; for (let k = 0; k < n; k++) { s.step();
   ok(prevented && comp.sim.at(R5).d === 2, 'a click while R is held is ignored (the repeater delay did not change)');
   comp.onWinBlur();
   ok(!comp.aim, 'switching windows while R is held finishes the turn');
+}
+// 22. Items: hoppers, droppers, chests and comparators reading them (Java rules)
+{
+  const { invSignal } = mod;
+  const slots = (arr, size) => { const s = new Array(size).fill(null); arr.forEach((it, k) => { if (it) s[k] = { id: it[0], n: it[1] }; }); return s; };
+  eq([invSignal(slots([], 5)), invSignal(slots([['diamond', 1]], 5)), invSignal(slots([['diamond', 22]], 5)), invSignal(slots([['diamond', 23]], 5))], [0, 1, 1, 2],
+    'comparator reads a hopper: 0 empty, 1 from the first item, 2 from 23 items');
+  eq([invSignal(slots([['diamond', 18], ['filler', 1], ['filler', 1], ['filler', 1], ['filler', 1]], 5)), invSignal(slots([['diamond', 19], ['filler', 1], ['filler', 1], ['filler', 1], ['filler', 1]], 5))], [1, 2],
+    'the diamond filter reads 1 with 18 diamonds and 2 with 19');
+  eq(invSignal(slots(new Array(27).fill(['diamond', 64]), 27)), 15, 'a full chest reads 15');
+  eq(invSignal(slots([['token', 41]], 9)), 1, 'a dropper with 41 tokens still reads just 1');
+
+  const cnt = (s, x, y, id) => s.at(I(x, y)).slots.reduce((a, st) => a + (st && (!id || st.id === id) ? st.n : 0), 0);
+  // Chest -> hopper -> chest: one item every 8 game ticks (2.5 a second)
+  let s = mk([['chest', 0, 0, '', [['diamond', 64]]], ['hopper', 1, 0, 'E'], ['chest', 2, 0, '']]);
+  const times = [];
+  for (let t = 1, prev = 0; t <= 41; t++) { s.step(); const n = cnt(s, 2, 0); if (n !== prev) { times.push(s.S.now); prev = n; } }
+  eq(times, [9, 17, 25, 33, 41], 'a hopper moves one item every 8 game ticks');
+
+  // A powered hopper is locked
+  s = mk([['chest', 0, 0, '', [['diamond', 10]]], ['hopper', 1, 0, 'E'], ['chest', 2, 0, ''], ['lever', 1, 1, 'floor', 'on']]);
+  run(s, 40);
+  ok(cnt(s, 2, 0) === 0 && s.at(I(1, 0)).locked, 'a powered hopper holds still');
+  s.use(I(1, 1)); run(s, 40);
+  ok(cnt(s, 2, 0) > 0 && !s.at(I(1, 0)).locked, 'unpowered, it moves items again');
+
+  // The filter only takes diamonds; dirt stays in the coin slot
+  s = mk([['hopper', 0, 0, 'N', [['dirt', 5], ['diamond', 3]]], ['hopper', 1, 0, 'E', [['diamond', 18], ['filler', 1], ['filler', 1], ['filler', 1], ['filler', 1]]], ['comparator', 1, 1, 'S']]);
+  ok(s.at(I(1, 1)).out === 1, 'filter comparator reads 1 at rest');
+  run(s, 60);
+  ok(cnt(s, 0, 0, 'dirt') === 5 && cnt(s, 0, 0, 'diamond') === 0 && cnt(s, 1, 0, 'diamond') === 21 && s.at(I(1, 1)).out === 2, 'the filter took the 3 diamonds and left the dirt');
+
+  // Dropper: one item per new pulse, 4 game ticks later; into a chest in front, or onto the ground
+  s = mk([['stone_button', 0, 1, 'floor'], ['dropper', 1, 1, 'E', [['golden_apple', 3]]], ['dropper', 1, 3, 'E', [['golden_apple', 3]]], ['chest', 2, 3, ''], ['stone_button', 0, 3, 'floor']]);
+  s.use(I(0, 1));
+  const outs = run(s, 8, (x) => x.at(I(1, 1)).out);
+  eq(outs, [0, 0, 0, 1, 1, 1, 1, 1], 'a dropper fires once, 4 game ticks after the button');
+  eq(s.S.ground.get(I(2, 1)), { golden_apple: 1 }, 'with nothing in front, the item lands on the ground');
+  s.use(I(0, 3)); run(s, 8);
+  ok(cnt(s, 2, 3) === 1 && cnt(s, 1, 3) === 2, 'with a chest in front, the item goes into the chest');
+  eq(s.pickUp(I(2, 1)), { golden_apple: 1 }, 'picking up the ground pile');
+  ok(!s.S.ground.has(I(2, 1)), 'and then it is gone');
+
+  // Contents survive save and load
+  const a = JSON.stringify(s.serialize());
+  const s2 = createSim(24, 16); s2.load(JSON.parse(a));
+  eq(JSON.stringify(s2.serialize()), a, 'containers round-trip through layout codes');
+}
+// 23. The diamond shop concept
+{
+  const shop = CONCEPTS.find((c) => c.id === 'diamond-shop');
+  ok(!!shop, 'the diamond shop is in the library');
+  const COIN = I(6, 5), T = I(13, 9), PAY = I(16, 8), GROUND = I(17, 8);
+  const cnt = (s, i, id) => s.at(i).slots.reduce((a, st) => a + (st && (!id || st.id === id) ? st.n : 0), 0);
+  const total = (s, id) => s.S.cells.reduce((a, c) => a + (c && c.slots ? c.slots.reduce((b, st) => b + (st && st.id === id ? st.n : 0), 0) : 0), 0);
+  function shopRun(price, plan, ticks) {
+    const s = createSim(24, 16);
+    s.load({ cells: shop.cells });
+    if (price > 3) s.giveItems(T, 'token', price - 3); else if (price < 3) s.takeItems(T, 'token', 3 - price);
+    let paid = 0, badTokens = false;
+    for (let t = 1; t <= ticks; t++) {
+      if (plan[t]) for (const [id, n] of plan[t]) { const k = s.giveItems(COIN, id, n); if (id === 'diamond') paid += k; }
+      s.step();
+      if (total(s, 'token') !== price) badTokens = true;
+    }
+    return { s, paid, sold: s.at(PAY).out, badTokens };
+  }
+  let r = shopRun(3, {}, 200);
+  ok(r.sold === 0 && cnt(r.s, T, 'token') === 3, 'at rest nothing is sold and the counter holds 3 tokens');
+  r = shopRun(3, { 1: [['diamond', 2]] }, 300);
+  ok(r.sold === 0, 'paying 2 of 3 diamonds sells nothing yet');
+  r = shopRun(3, { 1: [['diamond', 3]] }, 300);
+  ok(r.sold === 1 && (r.s.S.ground.get(GROUND) || {}).golden_apple === 1, 'paying 3 sells one golden apple, dropped in front of the shop');
+  ok(cnt(r.s, I(7, 3), 'diamond') + cnt(r.s, I(7, 4), 'diamond') === 3 && cnt(r.s, I(7, 5), 'diamond') === 18, 'the 3 diamonds went to the bank (or the gate on its way there); the filter is back to 18');
+  ok(cnt(r.s, T, 'token') === 3 && !r.badTokens, 'the counter reset with all 3 tokens');
+  r = shopRun(3, { 1: [['diamond', 1]], 60: [['diamond', 1]], 200: [['diamond', 1]] }, 500);
+  ok(r.sold === 1, 'paying 3 diamonds one at a time also sells one');
+  r = shopRun(3, { 1: [['dirt', 5]] }, 300);
+  ok(r.sold === 0 && cnt(r.s, COIN, 'dirt') === 5, 'paying with dirt sells nothing; the dirt stays in the coin slot');
+  r = shopRun(3, { 1: [['dirt', 5], ['diamond', 3]] }, 400);
+  ok(r.sold === 1 && cnt(r.s, COIN, 'dirt') === 5, 'dirt mixed with diamonds: the diamonds still count');
+  r = shopRun(3, { 1: [['diamond', 7]] }, 800);
+  ok(r.sold === 2 && cnt(r.s, T, 'token') === 2, 'paying 7 at price 3 sells 2, and 1 diamond counts toward the next');
+  r = shopRun(5, { 1: [['diamond', 10]] }, 900);
+  ok(r.sold === 2 && !r.badTokens, 'price 5: paying 10 sells 2');
+  r = shopRun(2, { 1: [['diamond', 4]] }, 500);
+  ok(r.sold === 2, 'price 2: paying 4 sells 2');
+  r = shopRun(3, { 1: [['diamond', 64]] }, 3000);
+  ok(r.sold === 21 && !r.badTokens && cnt(r.s, COIN, 'diamond') === 0, 'a whole stack of 64 at price 3 sells 21 and nothing gets stuck');
+  ok(total(r.s, 'golden_apple') + ((r.s.S.ground.get(GROUND) || {}).golden_apple || 0) === 136, 'every golden apple is either in stock or on the ground');
+  // Random payments at random prices: sales always match, tokens and diamonds are never lost
+  let seed = 7, bad = 0;
+  const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+  for (let trial = 0; trial < 12; trial++) {
+    const price = 2 + rnd(7), plan = {};
+    for (let k = 0; k < 5; k++) plan[1 + rnd(1200)] = [['diamond', 1 + rnd(9)]];
+    const q = shopRun(price, plan, 3500);
+    const inMachine = total(q.s, 'diamond') - 18;
+    if (q.badTokens || q.sold !== Math.floor(q.paid / price) || inMachine !== q.paid) bad++;
+  }
+  ok(bad === 0, 'random payments at random prices: sales always match and nothing is lost (' + bad + ' bad)');
+}
+// 24. The shop panel in the app
+{
+  const comp = new Component({});
+  comp.componentDidMount = () => {};
+  comp.mounted = true;
+  comp.loadConcept('diamond-shop');
+  let v = comp.renderVals();
+  ok(v.shop && v.shop.price === 3 && v.shop.sold === 0 && v.shop.stock === 136, 'the shop panel shows price 3, nothing sold, 136 golden apples in stock');
+  comp.setShopPrice(-1);
+  ok(comp.renderVals().shop.price === 2, 'the − button lowers the price to 2');
+  comp.setShopPrice(-1);
+  ok(comp.renderVals().shop.price === 2 && /at least 2/.test(comp.state.notice), 'it will not go below 2, and says why');
+  comp.setShopPrice(1);
+  ok(comp.renderVals().shop.price === 3, 'the + button raises it again');
+  comp.state.hover = -1; comp.state.sel = -1;
+  comp.act(I(6, 5), false, false, false);
+  ok(/Paid 1 diamond/.test(comp.state.notice), 'clicking the coin slot pays one diamond');
+  comp.payShop('diamond', 2);
+  for (let k = 0; k < 300; k++) comp.tickOnce();
+  v = comp.renderVals();
+  ok(v.shop.sold === 1 && v.shop.bank === 3 && v.shop.stock === 135, 'after paying 3: one sold, 3 diamonds in the bank, 135 left');
+  ok(v.cells.some((cd) => cd.tr === 'translate(680 320)'), 'the golden apple is drawn on the ground in front of the shop');
+  const d = comp.describe(I(17, 8));
+  ok(d.name === 'Items on the ground' && /1 golden apple/.test(d.lines[0]), 'the inspector explains the item on the ground');
+  comp.act(I(17, 8), false, false, false);
+  ok(!comp.sim.S.ground.size && comp.sim.at(I(17, 8)) === null, 'clicking it picks it up instead of placing a part');
+  const f = comp.describe(I(7, 5));
+  ok(f.inv && f.inv.length === 5 && f.inv[0].n === 18 && f.inv[1].n === 1 && f.invCols === 5, 'the filter hopper shows its 5 slots: 18 diamonds and the filler sticks');
+  comp.payShop('diamond', 1);
+  for (let k = 0; k < 60; k++) comp.tickOnce();
+  comp.setShopPrice(1);
+  ok(/middle of a sale/.test(comp.state.notice) && comp.renderVals().shop.price === 3, 'the price can not change in the middle of a sale');
+  comp.payShop('dirt', 1);
+  ok(/won’t take it/.test(comp.state.notice), 'paying with dirt explains what will happen');
 }
 console.log(`\n${passes} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);

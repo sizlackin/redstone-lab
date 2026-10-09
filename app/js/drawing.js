@@ -375,6 +375,135 @@ function drawMoving(m, ctx) {
   out.push(prim('M9 20H29M23 13.5L29.5 20L23 26.5', 'none', { stroke: '#f4f1ea', sw: 2.6, tr: ROT(m.dir) }));
   return out;
 }
+
+/* ---- Items and storage ----
+   Item pictures are 16 × 16 texels too, so they can be drawn full size (ground piles, inspector slots) or small
+   (the corner of a chest or hopper). */
+function itemGrid(id) {
+  const g = grid16();
+  switch (id) {
+    case 'diamond': {
+      const O = '#0e3f3d', B = '#2bbcae', L = '#86f3e5', W = '#effffd', D = '#17877c';
+      gFill(g, 5, 3, 6, 1, O);
+      gFill(g, 4, 4, 1, 1, O); gFill(g, 5, 4, 6, 1, B); gFill(g, 6, 4, 2, 1, L); gFill(g, 11, 4, 1, 1, O);
+      gFill(g, 3, 5, 1, 1, O); gFill(g, 4, 5, 8, 1, B); gFill(g, 4, 5, 2, 1, L); gFill(g, 12, 5, 1, 1, O);
+      gFill(g, 2, 6, 1, 2, O); gFill(g, 3, 6, 10, 2, B); gFill(g, 13, 6, 1, 2, O);
+      gPix(g, [4, 6], W); gFill(g, 5, 6, 2, 1, L); gFill(g, 10, 7, 3, 1, D);
+      gFill(g, 3, 8, 1, 1, O); gFill(g, 4, 8, 8, 1, B); gFill(g, 9, 8, 3, 1, D); gFill(g, 12, 8, 1, 1, O);
+      gFill(g, 4, 9, 1, 1, O); gFill(g, 5, 9, 6, 1, B); gFill(g, 8, 9, 3, 1, D); gFill(g, 11, 9, 1, 1, O);
+      gFill(g, 5, 10, 1, 1, O); gFill(g, 6, 10, 4, 1, B); gFill(g, 8, 10, 2, 1, D); gFill(g, 10, 10, 1, 1, O);
+      gFill(g, 6, 11, 1, 1, O); gFill(g, 7, 11, 2, 1, D); gFill(g, 9, 11, 1, 1, O);
+      gFill(g, 7, 12, 2, 1, O);
+      break;
+    }
+    case 'dirt':
+      gNoise(g, 3, 3, 10, 10, [['#866043', 58], ['#6c4a30', 27], ['#9b7654', 15]], 9);
+      gFrame(g, 3, 3, 10, 10, '#4a3220');
+      break;
+    case 'golden_apple': {
+      const O = '#7a5300', B = '#f5c518', L = '#fff1a6', D = '#d39e00';
+      gFill(g, 8, 2, 1, 2, '#5e3b16'); gFill(g, 9, 2, 2, 1, '#4caf2a'); gPix(g, [10, 3], '#3b8a1f');
+      gFill(g, 5, 4, 3, 1, O); gFill(g, 9, 4, 3, 1, O);
+      gFill(g, 4, 5, 1, 1, O); gFill(g, 5, 5, 7, 1, B); gFill(g, 12, 5, 1, 1, O);
+      gFill(g, 3, 6, 1, 4, O); gFill(g, 4, 6, 9, 4, B); gFill(g, 13, 6, 1, 4, O);
+      gFill(g, 5, 5, 2, 1, L); gFill(g, 4, 6, 2, 2, L); gFill(g, 10, 8, 3, 2, D);
+      gFill(g, 4, 10, 1, 1, O); gFill(g, 5, 10, 7, 1, B); gFill(g, 8, 10, 4, 1, D); gFill(g, 12, 10, 1, 1, O);
+      gFill(g, 5, 11, 1, 1, O); gFill(g, 6, 11, 5, 1, D); gFill(g, 11, 11, 1, 1, O);
+      gFill(g, 6, 12, 5, 1, O);
+      break;
+    }
+    case 'token':
+      gFill(g, 4, 3, 8, 10, '#f2efe2'); gFrame(g, 4, 3, 8, 10, '#8f8a76');
+      gFill(g, 5, 5, 6, 1, '#b9b29a'); gFill(g, 5, 7, 6, 1, '#b9b29a'); gFill(g, 5, 9, 4, 1, '#b9b29a');
+      gFill(g, 10, 3, 2, 2, '#d8d2bc');
+      break;
+    case 'filler':
+      for (let k = 0; k <= 8; k++) { gFill(g, 4 + k, 12 - k, 2, 1, '#8a5a2b'); gPix(g, [4 + k, 13 - k], '#5c3b19'); }
+      break;
+    default:
+      gFill(g, 4, 4, 8, 8, '#cc4cc4');
+  }
+  return g;
+}
+const ITEM_ICON_CACHE = {};
+/* An item picture: size = how many pixels wide, x/y = top-left corner inside the 40 × 40 square. */
+function itemIcon(id, x, y, size) {
+  const key = id + '|' + x + '|' + y + '|' + size;
+  if (!ITEM_ICON_CACHE[key]) ITEM_ICON_CACHE[key] = gPrims(itemGrid(id), { tr: 'translate(' + x + ' ' + y + ') scale(' + r2(size / 40) + ')' });
+  return ITEM_ICON_CACHE[key];
+}
+/* Minecraft-style stack count: white pixel digits with a dark shadow, right-aligned at (rx, by). */
+function countText(n, rx, by, s) {
+  const str = String(n), w = str.length * 4 * s - s;
+  const x = rx - w, y = by - 5 * s;
+  return [prim(pxText(str, x + s * 0.7, y + s * 0.7, s), '#2a2a2a', { sr: 'crispEdges' }), prim(pxText(str, x, y, s), '#ffffff', { sr: 'crispEdges' })];
+}
+/* The most plentiful item in a container, and how many items there are in total. */
+function invSummary(slots) {
+  const by = {};
+  let total = 0;
+  for (const st of slots) if (st) { by[st.id] = (by[st.id] || 0) + st.n; total += st.n; }
+  let top = null;
+  for (const id in by) if (!top || by[id] > by[top]) top = id;
+  return { top, total };
+}
+/* Small item badge in the bottom-left corner of a chest, hopper or dropper. */
+function invBadge(slots) {
+  const sm = invSummary(slots);
+  if (!sm.top) return [];
+  return [prim(RR(0.8, 23.8, 16.4, 15.4, 2.5), '#0a0b0e', { op: 0.55 }), ...itemIcon(sm.top, 1, 24, 15), ...countText(sm.total, 17, 38.6, 1.4)];
+}
+function spChest(c) {
+  const g = grid16();
+  gFill(g, 0, 0, 16, 16, '#2b1b0b');
+  gFill(g, 1, 1, 14, 14, '#a8752e');
+  for (let j = 1; j < 15; j++) for (let i = 1; i < 15; i++) {
+    const r = hsh(i, j, 21);
+    if (r < 0.14) gFill(g, i, j, 1, 1, '#93641f'); else if (r > 0.9) gFill(g, i, j, 1, 1, '#c08a3c');
+  }
+  gFill(g, 1, 5, 14, 1, '#7d531b'); gFill(g, 1, 10, 14, 1, '#7d531b');
+  gFill(g, 1, 1, 14, 1, '#c99446');
+  gFill(g, 6, 12, 4, 3, '#4a4a4a'); gFill(g, 7, 12, 2, 2, '#d0d0d0');
+  return [...gPrims(g), ...invBadge(c.slots)];
+}
+/* Hopper, drawn facing east: a grey funnel. It takes items from behind (west) and pushes them out of the spout
+   on the east side, along the arrow. A locked (powered) hopper's arrow turns red. */
+function spHopper(c) {
+  const tr = ROT(c.f), g = grid16(), ac = c.locked ? '#e0412b' : '#e6e6e6';
+  gFill(g, 0, 0, 16, 16, '#3c3c3c');
+  gFill(g, 1, 1, 14, 14, '#6f6f6f');
+  gFill(g, 1, 1, 14, 1, '#8a8a8a'); gFill(g, 1, 1, 1, 14, '#808080');
+  gFill(g, 3, 3, 10, 10, '#2c2c2c'); gFill(g, 4, 4, 8, 8, '#363636');
+  gFill(g, 6, 6, 4, 4, '#1b1b1b');
+  gFill(g, 13, 6, 3, 4, '#262626'); gFill(g, 14, 7, 2, 2, '#111111');
+  gFill(g, 1, 7, 2, 2, '#9a9a9a');
+  gFill(g, 4, 7, 6, 2, ac); gFill(g, 10, 5, 1, 6, ac); gFill(g, 11, 6, 1, 4, ac); gFill(g, 12, 7, 1, 2, ac);
+  if (c.locked) { gFill(g, 13, 5, 1, 6, '#e0412b'); }
+  return [...gPrims(g, { tr }), ...invBadge(c.slots)];
+}
+/* Dropper, drawn facing east: stone front with a square mouth on the east side and an arrow showing where items go. */
+function spDropper(c, fx) {
+  const tr = ROT(c.f), g = grid16(), ac = c.trig ? RED : '#d2d2d2';
+  gCobble(g, 0, 0, 16, 16, 17);
+  gFrame(g, 0, 0, 16, 16, '#4a4a4a');
+  gFill(g, 12, 4, 4, 8, '#3a3a3a'); gFill(g, 13, 5, 3, 6, '#141414');
+  gFill(g, 3, 7, 6, 2, ac); gFill(g, 9, 5, 1, 6, ac); gFill(g, 10, 6, 1, 4, ac); gFill(g, 11, 7, 1, 2, ac);
+  const out = [...gPrims(g, { tr })];
+  if (fx && fx.kind === 'drop' && fx.item) {
+    const p = rotPt(46, 20, c.f < 0 ? 1 : c.f);
+    out.push(...itemIcon(fx.item, r2(p[0] - 8), r2(p[1] - 8), 16));
+  }
+  out.push(...invBadge(c.slots));
+  return out;
+}
+/* Items lying on an empty square: a shadow, the item, and how many. */
+function groundSprite(pile) {
+  const ids = Object.keys(pile);
+  if (!ids.length) return [];
+  let top = ids[0], total = 0;
+  for (const id of ids) { total += pile[id]; if (pile[id] > pile[top]) top = id; }
+  return [prim('M8 31a12 4 0 1 0 24 0a12 4 0 1 0 -24 0z', '#000000', { op: 0.35 }), ...itemIcon(top, 9, 8, 22), ...countText(total, 34, 36, 1.6)];
+}
 function drawPart(c, ctx) {
   ctx = ctx || {};
   switch (c.t) {
@@ -397,6 +526,9 @@ function drawPart(c, ctx) {
     case 'lamp': return spLamp(c);
     case 'dispenser': return spDispenser(c, ctx.fx);
     case 'bulb': return spBulb(c);
+    case 'chest': return spChest(c);
+    case 'hopper': return spHopper(c);
+    case 'dropper': return spDropper(c, ctx.fx);
     default: return [];
   }
 }
@@ -464,6 +596,7 @@ function probeValue(sim, i) {
     case 'torch': case 'lamp': case 'bulb': return c.lit ? 15 : 0;
     case 'piston': return c.ext ? 15 : 0;
     case 'dispenser': return c.trig ? 15 : 0;
+    case 'chest': case 'hopper': case 'dropper': return invSignal(c.slots);
     case 'block': return sim.blockPower(i, true);
     case 'repeater': case 'observer': case 'lever': case 'button': case 'plate': case 'hook': case 'string': return c.on ? 15 : 0;
     default: return 0;
@@ -480,7 +613,7 @@ function wave(hist) {
 }
 const SEC_MARKS = (() => { let d = ''; for (let s = 0; s <= 6; s++) d += 'M' + s * 60 + ' 0V32'; return d; })();
 function shortName(c) {
-  const m = { dust: 'Dust', torch: 'Torch', repeater: 'Repeater', comparator: 'Comparator', observer: 'Observer', lever: 'Lever', button: 'Button', plate: 'Plate', hook: 'Hook', string: 'Tripwire', lamp: 'Lamp', dispenser: 'Dispenser', bulb: 'Bulb', block: 'Block', rblock: 'Redstone block', glass: 'Glass' };
+  const m = { dust: 'Dust', torch: 'Torch', repeater: 'Repeater', comparator: 'Comparator', observer: 'Observer', lever: 'Lever', button: 'Button', plate: 'Plate', hook: 'Hook', string: 'Tripwire', lamp: 'Lamp', dispenser: 'Dispenser', bulb: 'Bulb', block: 'Block', rblock: 'Redstone block', glass: 'Glass', chest: 'Chest', hopper: 'Hopper', dropper: 'Dropper' };
   if (c.t === 'piston') return c.sticky ? 'Sticky piston' : 'Piston';
   return m[c.t] || TYPES[c.t].name;
 }
